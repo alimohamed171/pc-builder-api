@@ -1,0 +1,257 @@
+{
+  "info": {
+    "name": "PC Builder API",
+    "_postman_id": "pc-builder-api-8088",
+    "description": "Spring Boot PC Bundle Builder API. Base URL runs on port 8088.\n\nAuth flow: run Register or Login first — the response token is saved automatically into the `token` collection variable and reused as a Bearer token on all Bundle requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8088", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "product_id", "value": "1", "type": "string" },
+    { "key": "bundle_id", "value": "1", "type": "string" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{token}}", "type": "string" }
+    ]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Sara Ahmed\",\n  \"email\": \"sara@example.com\",\n  \"password\": \"secret123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/register",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "auth", "register" ]
+            },
+            "description": "Creates a new user account and returns a JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "    const json = pm.response.json();",
+                  "    if (json.data && json.data.token) {",
+                  "        pm.collectionVariables.set('token', json.data.token);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"sara@example.com\",\n  \"password\": \"secret123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "auth", "login" ]
+            },
+            "description": "Logs in and returns a JWT."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    if (json.data && json.data.token) {",
+                  "        pm.collectionVariables.set('token', json.data.token);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "Get Products (paginated)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/products?category=CPU&page=0&size=20",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "products" ],
+              "query": [
+                { "key": "category", "value": "CPU", "description": "Optional. One of CPU, MOTHERBOARD, GPU, PSU, CASE, COOLER, MEMORY" },
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Random Deals",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/products/deals/random?category=GPU&limit=10",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "products", "deals", "random" ],
+              "query": [
+                { "key": "category", "value": "GPU", "description": "Optional" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Search Products",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/products/search?category=GPU&minPrice=10000&maxPrice=50000&keyword=rtx&inStockOnly=false&page=0&size=20",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "products", "search" ],
+              "query": [
+                { "key": "category", "value": "GPU" },
+                { "key": "minPrice", "value": "10000" },
+                { "key": "maxPrice", "value": "50000" },
+                { "key": "keyword", "value": "rtx" },
+                { "key": "inStockOnly", "value": "false" },
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Product By Id",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/products/{{product_id}}",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "products", "{{product_id}}" ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Bundles",
+      "item": [
+        {
+          "name": "Create Bundle",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"My Gaming Rig\",\n  \"items\": [\n    { \"productId\": 1, \"quantity\": 1 },\n    { \"productId\": 34, \"quantity\": 1 },\n    { \"productId\": 159, \"quantity\": 1 },\n    { \"productId\": 195, \"quantity\": 1 }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/bundles",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "bundles" ]
+            },
+            "description": "Requires Authorization: Bearer <token>. Always saves the bundle; response `data.compatible` tells you whether the parts fit together."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const json = pm.response.json();",
+                  "    if (json.data && json.data.id) {",
+                  "        pm.collectionVariables.set('bundle_id', json.data.id);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Bundle",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"My Gaming Rig (Updated)\",\n  \"items\": [\n    { \"productId\": 1, \"quantity\": 1 },\n    { \"productId\": 34, \"quantity\": 1 }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/bundles/{{bundle_id}}",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "bundles", "{{bundle_id}}" ]
+            },
+            "description": "Requires Authorization: Bearer <token>. Replaces the bundle's items and re-checks compatibility."
+          }
+        },
+        {
+          "name": "Get Bundle By Id",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/bundles/{{bundle_id}}",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "bundles", "{{bundle_id}}" ]
+            },
+            "description": "Requires Authorization: Bearer <token>."
+          }
+        },
+        {
+          "name": "Get My Bundles",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/bundles?page=0&size=20",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "bundles" ],
+              "query": [
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "20" }
+              ]
+            },
+            "description": "Requires Authorization: Bearer <token>."
+          }
+        }
+      ]
+    }
+  ]
+}
