@@ -27,7 +27,7 @@ spring:
 app:
   jwt:
     secret: ${JWT_SECRET}
-    expiration-ms: ${JWT_EXPIRATION_MS:86400000}   # 24h
+    expiration-ms: ${JWT_EXPIRATION_MS}
   bundle:
     default-min-psu-headroom-watts: ${PSU_HEADROOM_WATTS:150}
     default-gpu-draw-watts: ${DEFAULT_GPU_DRAW_WATTS:250}
