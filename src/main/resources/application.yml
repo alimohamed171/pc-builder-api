@@ -11,6 +11,7 @@ spring:
     password: ${MYSQLPASSWORD:1234}
     driver-class-name: com.mysql.cj.jdbc.Driver
 
+
   jpa:
     hibernate:
       # products table already exists (imported from pc_bundle_export.sql).
