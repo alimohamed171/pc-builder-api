@@ -252,6 +252,87 @@
           }
         }
       ]
+    },
+    {
+      "name": "AI",
+      "item": [
+        {
+          "name": "AI Chat",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionId\": 1,\n  \"message\": \"Hello, can you help me build a PC?\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/ai/chat",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "ai", "chat" ]
+            },
+            "description": "Requires Authorization: Bearer <token>. Chat with the AI about PC building."
+          }
+        },
+        {
+          "name": "Generate Build",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"I want a high-end gaming PC for 4K gaming\",\n  \"budget\": 3000,\n  \"usage\": \"GAMING\",\n  \"preferredBrand\": \"NVIDIA\",\n  \"mustInclude\": [\"RTX 4090\"]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/ai/build-generator",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "ai", "build-generator" ]
+            },
+            "description": "Requires Authorization: Bearer <token>. Generate a PC build based on a prompt and preferences."
+          }
+        },
+        {
+          "name": "Compare Builds",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"buildIds\": [1, 2]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/ai/compare-builds",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "ai", "compare-builds" ]
+            },
+            "description": "Requires Authorization: Bearer <token>. Compare two or more builds."
+          }
+        },
+        {
+          "name": "Compatibility Check",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"componentIds\": [1, 5, 12, 18],\n  \"note\": \"Checking if these parts fit together\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/ai/compatibility-check",
+              "host": [ "{{base_url}}" ],
+              "path": [ "api", "ai", "compatibility-check" ]
+            },
+            "description": "Requires Authorization: Bearer <token>. Check compatibility of a list of component IDs using AI."
+          }
+        }
+      ]
     }
   ]
 }
