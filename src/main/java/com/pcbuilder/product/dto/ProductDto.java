@@ -4,6 +4,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Map;
 
 @Getter
@@ -19,4 +20,6 @@ public class ProductDto {
     private String sourceUrl;
     private String matchedGlobalName;
     private Map<String, String> specs;
+    private String imageUrl;
+    private List<String> images;
 }

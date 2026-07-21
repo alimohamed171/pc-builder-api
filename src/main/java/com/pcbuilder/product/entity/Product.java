@@ -47,9 +47,17 @@ public class Product {
     @Column(name = "match_confidence", precision = 5, scale = 4)
     private BigDecimal matchConfidence;
 
-    /** Raw JSON blob, e.g. {"socket":"AM5","tdp":"65", ...}. Parsed on demand via SpecsUtil. */
+    /**
+     * Raw JSON blob, e.g. {"socket":"AM5","tdp":"65", ...}. Parsed on demand via SpecsUtil.
+     */
     @Column(name = "specs", columnDefinition = "json")
     private String specs;
+
+    @Column(name = "image_url", length = 500)
+    private String imageUrl;
+
+    @Column(name = "images", columnDefinition = "json")
+    private String images;
 
     @Column(name = "first_seen_at")
     private LocalDateTime firstSeenAt;
