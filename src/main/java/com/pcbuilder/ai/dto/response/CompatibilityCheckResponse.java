@@ -9,7 +9,8 @@ import java.util.List;
 @AllArgsConstructor
 public class CompatibilityCheckResponse {
     private boolean compatible;
-    private List<String> issues;
+    private List<CompatibilityIssueResponse> issues;
+    private List<CompatibilityIssueResponse> warnings;
     private String explanation;
     private boolean resolvedByRuleEngine;
 }

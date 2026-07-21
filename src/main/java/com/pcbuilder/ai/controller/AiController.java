@@ -46,8 +46,9 @@ public class AiController {
 
     @PostMapping("/compatibility-check")
     public ResponseEntity<ApiResponse<CompatibilityCheckResponse>> checkCompatibility(
-            @Valid @RequestBody CompatibilityCheckRequest request) {
-        CompatibilityCheckResponse response = compatibilityAiService.check(request);
+            @Valid @RequestBody CompatibilityCheckRequest request,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        CompatibilityCheckResponse response = compatibilityAiService.check(request, principal.getId());
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 }
