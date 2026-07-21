@@ -1,7 +1,6 @@
 package com.pcbuilder.ai.service;
 
-import com.pcbuilder.ai.client.GeminiClient;
-import com.pcbuilder.ai.dto.gemini.GeminiContent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pcbuilder.ai.dto.request.ChatRequest;
 import com.pcbuilder.ai.dto.response.ChatResponse;
 import com.pcbuilder.ai.entity.ChatMessage;
@@ -11,12 +10,21 @@ import com.pcbuilder.ai.repository.ChatMessageRepository;
 import com.pcbuilder.ai.repository.ChatSessionRepository;
 import com.pcbuilder.auth.entity.User;
 import com.pcbuilder.auth.repository.UserRepository;
-import com.pcbuilder.common.SpecsUtil;
 import com.pcbuilder.exception.ResourceNotFoundException;
+import com.pcbuilder.product.dto.ProductDto;
 import com.pcbuilder.product.entity.Product;
 import com.pcbuilder.product.entity.ProductCategory;
+import com.pcbuilder.product.mapper.ProductMapper;
 import com.pcbuilder.product.repository.ProductRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.converter.BeanOutputConverter;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,50 +32,36 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
+// 1. Must be a record so Spring AI can generate a schema for it
+record ChatAiResult(String reply, List<Long> mentionedProductIds) {}
+
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class AiChatService {
 
+    // 2. Optimized prompt explicitly telling the AI to batch its requests
     private static final String SYSTEM_INSTRUCTION = """
-    You are a helpful hardware assistant for a PC-building website called pcbuilder.
-    Your ONLY job is to help users with PC hardware: choosing components, checking
-    compatibility, comparing builds, and explaining hardware concepts.
+        You are a helpful hardware assistant for a PC-building website called pcbuilder.
+        Your ONLY job is to help users with PC hardware: choosing components, checking
+        compatibility, comparing builds, and explaining hardware concepts.
 
-    SCOPE RULE (critical):
-    - If the user asks about anything unrelated to PC hardware/building (cooking,
-      recipes, general life advice, unrelated coding help, etc.), politely decline
-      and redirect them back to PC-related topics. Do NOT answer the off-topic
-      question, even partially. Example: "I'm here to help with PC builds and
-      hardware questions - I can't help with recipes, but let me know if you need
-      help picking components!"
+        CRITICAL TOOL USE RULES:
+        1. You have a "searchProducts" tool that accepts a LIST of categories.
+        2. When asked to build a PC, you MUST call the tool ONE TIME, passing ALL required categories at once (e.g., ["CPU", "MOTHERBOARD", "GPU", "MEMORY"]).
+        3. Never invent product names, IDs, or prices. Use only what the tool returns.
+        4. If the tool returns no results, honestly state that.
+        """;
 
-    IMPORTANT: If a "REAL-TIME CATALOG DATA" section is provided below, you MUST
-    use ONLY those exact products and EGP prices when recommending specific items
-    or quoting prices. Do NOT invent product names or prices from your own training
-    data. If the catalog data doesn't contain anything relevant to the question,
-    say so honestly and give general advice instead, without making up prices.
-
-    BUDGET RULES (critical):
-    - If the user has stated a budget anywhere earlier in this conversation, you
-      MUST remember it and check every subsequent recommendation against it.
-    - Before presenting any build or total price, explicitly state whether it fits
-      within the previously mentioned budget.
-    - If a full build or component exceeds the stated budget, you MUST say so
-      clearly at the very start of your reply (e.g. "Note: this build is X EGP
-      over your stated budget of Y EGP") - do not bury this in a footnote.
-    - If asked for "a full build" after a budget was given for a single component,
-      clarify whether the user means that component alone or the full PC budget,
-      but still flag clearly if your suggestion exceeds whichever budget applies.
-    - Never silently exceed a stated budget without a clear warning.
-
-    Keep answers concise and practical.
-    """;
-
+    private final ChatClient chatClient;
     private final ChatSessionRepository sessionRepository;
     private final ChatMessageRepository messageRepository;
     private final UserRepository userRepository;
     private final ProductRepository productRepository;
-    private final GeminiClient geminiClient;
+    private final ProductMapper productMapper;
+
+    // Tracks product ids returned by the tool during the current request only
+    private final ThreadLocal<Set<Long>> seenProductIds = ThreadLocal.withInitial(LinkedHashSet::new);
 
     @Transactional
     public ChatResponse chat(ChatRequest request, Long userId) {
@@ -84,28 +78,33 @@ public class AiChatService {
                 .findTop20BySessionIdOrderByCreatedAtDesc(session.getId());
         Collections.reverse(history);
 
-        List<GeminiContent> contents = history.stream()
-                .map(m -> GeminiContent.of(
-                        m.getRole() == MessageRole.USER ? "user" : "model",
-                        m.getContent()))
+        List<Message> conversation = history.stream()
+                .map(m -> m.getRole() == MessageRole.USER
+                        ? (Message) new UserMessage(m.getContent())
+                        : new AssistantMessage(m.getContent()))
                 .collect(Collectors.toList());
 
-        // inject real catalog data relevant to this specific message
-        String catalogContext = buildCatalogContext(request.getMessage());
-        if (!catalogContext.isEmpty()) {
-            // append as an extra "user" turn right before the actual message context,
-            // simplest way to ground the model without touching stored history
-            String lastUserContent = contents.get(contents.size() - 1).getParts().get(0).getText();
-            contents.get(contents.size() - 1).getParts().get(0)
-                    .setText(lastUserContent + "\n\n[REAL-TIME CATALOG DATA]\n" + catalogContext);
-        }
+        seenProductIds.get().clear();
 
-        String reply = geminiClient.generateText(SYSTEM_INSTRUCTION, contents);
+        // Let Spring AI handle the JSON formatting and schema generation
+        BeanOutputConverter<ChatAiResult> converter = new BeanOutputConverter<>(ChatAiResult.class);
+        String promptWithFormat = SYSTEM_INSTRUCTION + "\n\n" + converter.getFormat();
+
+        // Get the raw string first so we can salvage it if it breaks
+        String rawJson = chatClient.prompt()
+                .system(promptWithFormat)
+                .messages(conversation)
+                .tools(this)
+                .call()
+                .content();
+
+        // Parse using our bulletproof fallback method
+        ChatAiResult parsed = parseRobustly(rawJson, converter);
 
         ChatMessage assistantMessage = ChatMessage.builder()
                 .session(session)
                 .role(MessageRole.ASSISTANT)
-                .content(reply)
+                .content(parsed.reply())
                 .build();
         messageRepository.save(assistantMessage);
 
@@ -114,74 +113,140 @@ public class AiChatService {
         }
         sessionRepository.save(session);
 
-        return new ChatResponse(session.getId(), reply, LocalDateTime.now());
+        Set<Long> validSeen = seenProductIds.get();
+        List<Long> validIds = parsed.mentionedProductIds().stream()
+                .filter(validSeen::contains)
+                .collect(Collectors.toList());
+
+        // THE SMART FALLBACK: If the model broke the JSON but DID use the tool,
+        // automatically attach the products it looked at!
+        if (validIds.isEmpty() && !validSeen.isEmpty()) {
+            validIds = new ArrayList<>(validSeen);
+        }
+
+        List<ProductDto> mentionedProducts = validIds.isEmpty()
+                ? List.of()
+                : productRepository.findByIdIn(validIds).stream()
+                .map(productMapper::toDto)
+                .collect(Collectors.toList());
+
+        seenProductIds.remove();
+
+        return new ChatResponse(session.getId(), parsed.reply(), mentionedProducts, LocalDateTime.now());
     }
 
     /**
-     * Very simple keyword-based retrieval: detect which category(ies) the user
-     * is asking about and pull the cheapest in-stock products from that category.
-     * This is intentionally simple (no embeddings/vector search) - good enough
-     * for a graduation project demo.
+     * Attempts standard JSON parsing, but falls back to aggressive text scraping if the LLM mangles it.
      */
-    private String buildCatalogContext(String userMessage) {
-        String lower = userMessage.toLowerCase();
-        Set<ProductCategory> matchedCategories = new LinkedHashSet<>();
+    private ChatAiResult parseRobustly(String rawOutput, BeanOutputConverter<ChatAiResult> converter) {
+        try {
+            return converter.convert(rawOutput);
+        } catch (Exception e) {
+            log.warn("LLM generated invalid JSON. Salvaging text. Raw: {}", rawOutput);
+            String cleanText = rawOutput;
 
-        if (containsAny(lower, "cpu", "processor", "معالج")) matchedCategories.add(ProductCategory.CPU);
-        if (containsAny(lower, "gpu", "graphics card", "كارت شاشة", "vga")) matchedCategories.add(ProductCategory.GPU);
-        if (containsAny(lower, "motherboard", "mobo", "لوحة")) matchedCategories.add(ProductCategory.MOTHERBOARD);
-        if (containsAny(lower, "ram", "memory", "رامات")) matchedCategories.add(ProductCategory.MEMORY);
-        if (containsAny(lower, "psu", "power supply")) matchedCategories.add(ProductCategory.PSU);
-        if (containsAny(lower, "case", "casing")) matchedCategories.add(ProductCategory.CASE);
-        if (containsAny(lower, "cooler", "cooling", "fan")) matchedCategories.add(ProductCategory.COOLER);
+            // Aggressive fallback to rip out just the reply text for the user
+            if (rawOutput.contains("\"reply\"")) {
+                try {
+                    String[] parts = rawOutput.split("\"reply\"\\s*:\\s*\"", 2);
+                    if (parts.length > 1) {
+                        cleanText = parts[1];
+                        int end = cleanText.lastIndexOf("\",");
+                        if (end != -1) cleanText = cleanText.substring(0, end);
+                        cleanText = cleanText.replace("\\n", "\n").replace("\\\"", "\"");
+                    }
+                } catch (Exception ex) {
+                    // Ignore regex errors
+                }
+            }
 
-        // fallback: mentions "build" / "pc" / "gaming" with no specific part -> include a bit of everything
-        if (matchedCategories.isEmpty() &&
-                containsAny(lower, "build", "pc", "gaming", "budget", "recommend")) {
-            matchedCategories.addAll(List.of(ProductCategory.values()));
+            // If all else fails, just strip out the curly braces
+            if (cleanText.startsWith("{")) {
+                cleanText = cleanText.replaceAll("[{}]", "").trim();
+            }
+
+            return new ChatAiResult(cleanText, new ArrayList<>());
+        }
+    }
+
+    /**
+     * MULTI-SEARCH TOOL: Drastically reduces API round-trips and token usage
+     * by allowing the LLM to request multiple categories at the exact same time.
+     */
+    @Tool(description = "Search the real-time product catalog for ONE OR MORE hardware categories at the same time.")
+    public String searchProducts(
+            @ToolParam(description = "List of categories to search (e.g. ['CPU', 'GPU', 'MOTHERBOARD']). Valid values: CPU, MOTHERBOARD, GPU, PSU, CASE, COOLER, MEMORY, STORAGE")
+            List<String> categories) {
+
+        if (categories == null || categories.isEmpty()) {
+            return "{}";
         }
 
-        if (matchedCategories.isEmpty()) {
-            return ""; // question isn't about specific hardware, skip catalog injection
+        // 1. Convert strings to valid enums safely
+        List<ProductCategory> validCats = categories.stream()
+                .map(c -> {
+                    try { return ProductCategory.valueOf(c.toUpperCase()); }
+                    catch (Exception e) { return null; }
+                })
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        if (validCats.isEmpty()) {
+            return "{}";
         }
 
-        StringBuilder sb = new StringBuilder();
-        for (ProductCategory category : matchedCategories) {
-            List<Product> products = productRepository.findByCategory(category).stream()
-                    .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+        // 2. THE MEGA-OPTIMIZATION: Call your new Repository method!
+        // This hits the database EXACTLY ONCE using the IN (?, ?) clause.
+        List<Product> allProducts = productRepository.findByCategoryIn(validCats);
+
+        // 3. Group the results by category in Java memory
+        Map<ProductCategory, List<Product>> groupedProducts = allProducts.stream()
+                .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                .collect(Collectors.groupingBy(Product::getCategory));
+
+        // 4. Build the JSON for the AI
+        StringBuilder combinedResults = new StringBuilder("{");
+        boolean firstCat = true;
+
+        for (ProductCategory cat : validCats) {
+            List<Product> products = groupedProducts.getOrDefault(cat, List.of()).stream()
                     .sorted(Comparator.comparing(Product::getPriceEgp))
-                    .limit(8)
+                    .limit(4) // Limit to 4 per category to save AI tokens
                     .collect(Collectors.toList());
 
             if (products.isEmpty()) continue;
 
-            sb.append(category).append(":\n");
-            for (Product p : products) {
-                sb.append("- ")
-                        .append(p.getMatchedGlobalName() != null ? p.getMatchedGlobalName() : p.getRawName())
-                        .append(" | ").append(p.getPriceEgp()).append(" EGP")
-                        .append(" | store: ").append(p.getStore())
-                        .append(" | specs: ").append(SpecsUtil.parse(p.getSpecs()))
-                        .append("\n");
+            if (!firstCat) combinedResults.append(",");
+            firstCat = false;
+
+            combinedResults.append("\"").append(cat.name()).append("\":[");
+
+            for (int i = 0; i < products.size(); i++) {
+                Product p = products.get(i);
+                seenProductIds.get().add(p.getId());
+
+                if (i > 0) combinedResults.append(",");
+
+                String name = (p.getMatchedGlobalName() != null ? p.getMatchedGlobalName() : p.getRawName())
+                        .replace("\"", "'");
+
+                // Lightweight JSON to save tokens
+                combinedResults.append(String.format(
+                        "{\"id\":%d,\"name\":\"%s\",\"price\":%s}",
+                        p.getId(), name, p.getPriceEgp()
+                ));
             }
+            combinedResults.append("]");
         }
-        return sb.toString();
-    }
 
-    private boolean containsAny(String text, String... keywords) {
-        for (String k : keywords) {
-            if (text.contains(k)) return true;
-        }
-        return false;
+        combinedResults.append("}");
+        return combinedResults.toString();
     }
-
     private ChatSession resolveSession(Long sessionId, Long userId) {
         if (sessionId == null) {
             User user = userRepository.findById(userId)
                     .orElseThrow(() -> new ResourceNotFoundException("User not found"));
-            ChatSession newSession = ChatSession.builder()
-                    .user(user)
-                    .build();
+            ChatSession newSession = ChatSession.builder().user(user).build();
             return sessionRepository.save(newSession);
         }
         return sessionRepository.findByIdAndUserId(sessionId, userId)
