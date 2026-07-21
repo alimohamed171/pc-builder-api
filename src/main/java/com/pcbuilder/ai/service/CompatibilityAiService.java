@@ -17,6 +17,7 @@ import com.pcbuilder.exception.ResourceNotFoundException;
 import com.pcbuilder.product.entity.Product;
 import com.pcbuilder.product.repository.ProductRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -39,7 +40,7 @@ public class CompatibilityAiService {
         The rule engine's compatible/incompatible verdict is always the
         source of truth - never contradict it, only add nuance on top.
         For every soft risk you identify, put it on its own line prefixed
-        with "CAUTION: <rule_code>: <message>", where rule_code is a short
+        with exactly "CAUTION: <rule_code>: <message>", where rule_code is a short
         UPPER_SNAKE_CASE label (e.g. "CASE_GPU_LENGTH"). Keep the rest of
         your answer concise and practical.
         """;
@@ -48,6 +49,7 @@ public class CompatibilityAiService {
     private final BundleRepository bundleRepository;
     private final CompatibilityService compatibilityService;
     private final GeminiClient geminiClient;
+    private final ChatClient chatClient;
 
     public CompatibilityCheckResponse check(CompatibilityCheckRequest request, Long userId) {
         if (request.getBuildId() != null && request.getExistingComponentIds() != null
@@ -70,8 +72,20 @@ public class CompatibilityAiService {
 
         CompatibilityResult ruleResult = compatibilityService.evaluate(products);
         List<CompatibilityIssueResponse> issues = mapIssues(ruleResult);
-        String aiExplanation;
-        List<CompatibilityIssueResponse> aiWarnings;
+
+        // Respect the requested compatibility mode from the API spec
+        if ("RULE_BASED".equalsIgnoreCase(request.getMode())) {
+            String explanation = ruleResult.isCompatible()
+                    ? "All checked components are compatible."
+                    : issues.stream().map(CompatibilityIssueResponse::getMessage)
+                    .collect(Collectors.joining(" "));
+            return new CompatibilityCheckResponse(
+                    ruleResult.isCompatible(), issues, List.of(), explanation, true);
+        }
+
+        String aiExplanation = "";
+        List<CompatibilityIssueResponse> aiWarnings = List.of();
+
         try {
             String specsSummary = buildSpecsSummary(products);
             String ruleContext = ruleResult.isCompatible()
@@ -81,10 +95,18 @@ public class CompatibilityAiService {
                     .collect(Collectors.joining(" "));
 
             String prompt = specsSummary + "\n\n" + ruleContext;
-            List<GeminiContent> contents = List.of(GeminiContent.of("user", prompt));
-            aiExplanation = geminiClient.generateText(SYSTEM_INSTRUCTION, contents);
-            aiWarnings = extractAiWarnings(aiExplanation);
+
+            aiExplanation = chatClient.prompt()
+                    .system(SYSTEM_INSTRUCTION)
+                    .user(prompt)
+                    .call()
+                    .content();
+
+            if (aiExplanation != null) {
+                aiWarnings = extractAiWarnings(aiExplanation);
+            }
         } catch (Exception e) {
+            // Graceful fallback to rule-based response if AI service fails
             String explanation = ruleResult.isCompatible()
                     ? "All checked components are compatible."
                     : issues.stream().map(CompatibilityIssueResponse::getMessage)
