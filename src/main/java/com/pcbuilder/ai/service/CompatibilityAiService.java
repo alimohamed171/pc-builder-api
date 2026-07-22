@@ -1,13 +1,11 @@
 package com.pcbuilder.ai.service;
 
-import com.pcbuilder.ai.client.GeminiClient;
-import com.pcbuilder.ai.dto.gemini.GeminiContent;
+
 import com.pcbuilder.ai.dto.request.CompatibilityCheckRequest;
 import com.pcbuilder.ai.dto.response.CompatibilityCheckResponse;
 import com.pcbuilder.ai.dto.response.CompatibilityIssueResponse;
 import com.pcbuilder.bundle.entity.Bundle;
 import com.pcbuilder.bundle.entity.BundleItem;
-import com.pcbuilder.bundle.dto.CompatibilityIssueDto;
 import com.pcbuilder.bundle.dto.CompatibilityResult;
 import com.pcbuilder.bundle.repository.BundleRepository;
 import com.pcbuilder.bundle.service.CompatibilityService;
@@ -48,7 +46,6 @@ public class CompatibilityAiService {
     private final ProductRepository productRepository;
     private final BundleRepository bundleRepository;
     private final CompatibilityService compatibilityService;
-    private final GeminiClient geminiClient;
     private final ChatClient chatClient;
 
     public CompatibilityCheckResponse check(CompatibilityCheckRequest request, Long userId) {

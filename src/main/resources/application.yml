@@ -6,17 +6,17 @@ spring:
     name: pc-builder-api
 
   datasource:
-    url: jdbc:mysql://${MYSQLHOST:localhost}:${MYSQLPORT:3306}/${MYSQL_DATABASE:pc_bundle}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-    username: ${MYSQLUSER:root}
-    password: ${MYSQLPASSWORD:1234}
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:pc_bundle}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:1234}
     driver-class-name: com.mysql.cj.jdbc.Driver
-
 
   jpa:
     hibernate:
       # products table already exists (imported from pc_bundle_export.sql).
-      # "update" will create the new tables (users, bundles, bundle_items)
-      # without touching the existing products table structure/data.
+      # "update" will create the new tables (users, bundles, bundle_items,
+      # chat_sessions, chat_messages) without touching the existing products
+      # table structure/data.
       ddl-auto: update
     show-sql: ${JPA_SHOW_SQL:false}
     properties:
@@ -24,13 +24,32 @@ spring:
         format_sql: true
         dialect: org.hibernate.dialect.MySQLDialect
     open-in-view: false
+
+  cache:
+    type: caffeine
+    cache-names: productsByCategories
+    caffeine:
+      spec: expireAfterWrite=10m,maximumSize=500
+
   ai:
-      openai:
-        base-url: https://api.groq.com/openai
-        api-key: ${GROQ_API_KEY}
+    google:
+      genai:
+        api-key: ${GEMINI_API_KEY:dummy-not-used-for-other-providers}
         chat:
           options:
-            model: llama-3.3-70b-versatile
+            model: ${GEMINI_MODEL:gemini-2.5-flash}
+    openai:
+      api-key: ${GROQ_API_KEY:dummy-not-used-for-other-providers}
+      base-url: ${GROQ_BASE_URL:https://api.groq.com/openai}
+      chat:
+        options:
+          model: ${GROQ_MODEL:llama-3.3-70b-versatile}
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${OLLAMA_MODEL:llama3.2}
+
 app:
   jwt:
     secret: ${JWT_SECRET:9f7d2c8e4b1a6d3f5e8c0a7b9d2e4f6a8c1b3d5e7f9a2c4e6b8d0f2a4c6e8b1}
@@ -39,7 +58,7 @@ app:
     default-min-psu-headroom-watts: ${PSU_HEADROOM_WATTS:150}
     default-gpu-draw-watts: ${DEFAULT_GPU_DRAW_WATTS:250}
 
-gemini:
-  api-key: ${GEMINI_API_KEY}
-  model: ${GEMINI_MODEL:gemini-3.5-flash}
-  base-url: https://generativelanguage.googleapis.com/v1beta
+# --- AI ROUTING CONFIGURATION ---
+# Reads AI_PROVIDER from .env - "gemini", "groq", or "ollama". Defaults to "gemini".
+ai:
+  provider: ${AI_PROVIDER:gemini}
