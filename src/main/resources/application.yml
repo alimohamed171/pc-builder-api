@@ -25,6 +25,12 @@ spring:
         dialect: org.hibernate.dialect.MySQLDialect
     open-in-view: false
 
+  cache:
+    type: caffeine
+    cache-names: productsByCategories
+    caffeine:
+      spec: expireAfterWrite=10m,maximumSize=500
+
   ai:
     google:
       genai:

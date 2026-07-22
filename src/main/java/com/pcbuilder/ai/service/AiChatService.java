@@ -1,6 +1,5 @@
 package com.pcbuilder.ai.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pcbuilder.ai.dto.request.ChatRequest;
 import com.pcbuilder.ai.dto.response.ChatResponse;
 import com.pcbuilder.ai.entity.ChatMessage;
@@ -32,15 +31,14 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
-// 1. Must be a record so Spring AI can generate a schema for it
-record ChatAiResult(String reply, List<Long> mentionedProductIds) {}
-
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class AiChatService {
 
-    // 2. Optimized prompt explicitly telling the AI to batch its requests
+    /** Must be a record so Spring AI can generate a JSON schema for it. */
+    private record ChatAiResult(String reply, List<Long> mentionedProductIds) {}
+
     private static final String SYSTEM_INSTRUCTION = """
         You are a helpful hardware assistant for a PC-building website called pcbuilder.
         Your ONLY job is to help users with PC hardware: choosing components, checking
@@ -51,6 +49,12 @@ public class AiChatService {
         2. When asked to build a PC, you MUST call the tool ONE TIME, passing ALL required categories at once (e.g., ["CPU", "MOTHERBOARD", "GPU", "MEMORY"]).
         3. Never invent product names, IDs, or prices. Use only what the tool returns.
         4. If the tool returns no results, honestly state that.
+        5. When a budget is given, choose components that make good use of that
+           budget - do not default to the cheapest option in every category unless
+           the user explicitly asked for the cheapest possible build. A 35,000 EGP
+           budget should result in noticeably better components than a 10,000 EGP
+           budget, not the same picks. The tool returns options spread across the
+           full price range for each category - use that range deliberately.
         """;
 
     private final ChatClient chatClient;
@@ -58,9 +62,10 @@ public class AiChatService {
     private final ChatMessageRepository messageRepository;
     private final UserRepository userRepository;
     private final ProductRepository productRepository;
+    private final ProductCatalogCache productCatalogCache;
     private final ProductMapper productMapper;
 
-    // Tracks product ids returned by the tool during the current request only
+    /** Tracks product ids returned by the tool during the current request only. */
     private final ThreadLocal<Set<Long>> seenProductIds = ThreadLocal.withInitial(LinkedHashSet::new);
 
     @Transactional
@@ -86,11 +91,9 @@ public class AiChatService {
 
         seenProductIds.get().clear();
 
-        // Let Spring AI handle the JSON formatting and schema generation
         BeanOutputConverter<ChatAiResult> converter = new BeanOutputConverter<>(ChatAiResult.class);
         String promptWithFormat = SYSTEM_INSTRUCTION + "\n\n" + converter.getFormat();
 
-        // Get the raw string first so we can salvage it if it breaks
         String rawJson = chatClient.prompt()
                 .system(promptWithFormat)
                 .messages(conversation)
@@ -98,7 +101,8 @@ public class AiChatService {
                 .call()
                 .content();
 
-        // Parse using our bulletproof fallback method
+        log.info("[AI:rawFinalResponse] {}", rawJson);
+
         ChatAiResult parsed = parseRobustly(rawJson, converter);
 
         ChatMessage assistantMessage = ChatMessage.builder()
@@ -118,8 +122,6 @@ public class AiChatService {
                 .filter(validSeen::contains)
                 .collect(Collectors.toList());
 
-        // THE SMART FALLBACK: If the model broke the JSON but DID use the tool,
-        // automatically attach the products it looked at!
         if (validIds.isEmpty() && !validSeen.isEmpty()) {
             validIds = new ArrayList<>(validSeen);
         }
@@ -135,9 +137,6 @@ public class AiChatService {
         return new ChatResponse(session.getId(), parsed.reply(), mentionedProducts, LocalDateTime.now());
     }
 
-    /**
-     * Attempts standard JSON parsing, but falls back to aggressive text scraping if the LLM mangles it.
-     */
     private ChatAiResult parseRobustly(String rawOutput, BeanOutputConverter<ChatAiResult> converter) {
         try {
             return converter.convert(rawOutput);
@@ -145,7 +144,6 @@ public class AiChatService {
             log.warn("LLM generated invalid JSON. Salvaging text. Raw: {}", rawOutput);
             String cleanText = rawOutput;
 
-            // Aggressive fallback to rip out just the reply text for the user
             if (rawOutput.contains("\"reply\"")) {
                 try {
                     String[] parts = rawOutput.split("\"reply\"\\s*:\\s*\"", 2);
@@ -156,11 +154,10 @@ public class AiChatService {
                         cleanText = cleanText.replace("\\n", "\n").replace("\\\"", "\"");
                     }
                 } catch (Exception ex) {
-                    // Ignore regex errors
+                    // ignore, fall through to next fallback
                 }
             }
 
-            // If all else fails, just strip out the curly braces
             if (cleanText.startsWith("{")) {
                 cleanText = cleanText.replaceAll("[{}]", "").trim();
             }
@@ -169,24 +166,22 @@ public class AiChatService {
         }
     }
 
-    /**
-     * MULTI-SEARCH TOOL: Drastically reduces API round-trips and token usage
-     * by allowing the LLM to request multiple categories at the exact same time.
-     */
     @Tool(description = "Search the real-time product catalog for ONE OR MORE hardware categories at the same time.")
     public String searchProducts(
-            @ToolParam(description = "List of categories to search (e.g. ['CPU', 'GPU', 'MOTHERBOARD']). Valid values: CPU, MOTHERBOARD, GPU, PSU, CASE, COOLER, MEMORY, STORAGE")
+            @ToolParam(description = "List of categories to search (e.g. ['CPU', 'GPU', 'MOTHERBOARD']). Valid values: CPU, MOTHERBOARD, GPU, PSU, CASE, COOLER, MEMORY")
             List<String> categories) {
 
         if (categories == null || categories.isEmpty()) {
             return "{}";
         }
 
-        // 1. Convert strings to valid enums safely
         List<ProductCategory> validCats = categories.stream()
                 .map(c -> {
-                    try { return ProductCategory.valueOf(c.toUpperCase()); }
-                    catch (Exception e) { return null; }
+                    try {
+                        return ProductCategory.valueOf(c.toUpperCase());
+                    } catch (Exception e) {
+                        return null;
+                    }
                 })
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
@@ -195,24 +190,20 @@ public class AiChatService {
             return "{}";
         }
 
-        // 2. THE MEGA-OPTIMIZATION: Call your new Repository method!
-        // This hits the database EXACTLY ONCE using the IN (?, ?) clause.
-        List<Product> allProducts = productRepository.findByCategoryIn(validCats);
+        List<Product> allProducts = productCatalogCache.getByCategories(validCats);
 
-        // 3. Group the results by category in Java memory
         Map<ProductCategory, List<Product>> groupedProducts = allProducts.stream()
                 .filter(p -> Boolean.TRUE.equals(p.getInStock()))
                 .collect(Collectors.groupingBy(Product::getCategory));
 
-        // 4. Build the JSON for the AI
         StringBuilder combinedResults = new StringBuilder("{");
         boolean firstCat = true;
 
         for (ProductCategory cat : validCats) {
-            List<Product> products = groupedProducts.getOrDefault(cat, List.of()).stream()
+            List<Product> sorted = groupedProducts.getOrDefault(cat, List.of()).stream()
                     .sorted(Comparator.comparing(Product::getPriceEgp))
-                    .limit(4) // Limit to 4 per category to save AI tokens
                     .collect(Collectors.toList());
+            List<Product> products = selectSpreadSample(sorted, 10);
 
             if (products.isEmpty()) continue;
 
@@ -230,7 +221,6 @@ public class AiChatService {
                 String name = (p.getMatchedGlobalName() != null ? p.getMatchedGlobalName() : p.getRawName())
                         .replace("\"", "'");
 
-                // Lightweight JSON to save tokens
                 combinedResults.append(String.format(
                         "{\"id\":%d,\"name\":\"%s\",\"price\":%s}",
                         p.getId(), name, p.getPriceEgp()
@@ -240,8 +230,27 @@ public class AiChatService {
         }
 
         combinedResults.append("}");
-        return combinedResults.toString();
+        String result = combinedResults.toString();
+
+        log.info("[TOOL:searchProducts] categories={} -> result={}", validCats, result);
+
+        return result;
     }
+
+    private List<Product> selectSpreadSample(List<Product> sorted, int limit) {
+        if (sorted.size() <= limit) {
+            return sorted;
+        }
+        List<Product> result = new ArrayList<>();
+        double step = (double) sorted.size() / limit;
+        for (int i = 0; i < limit; i++) {
+            int index = (int) Math.round(i * step);
+            if (index >= sorted.size()) index = sorted.size() - 1;
+            result.add(sorted.get(index));
+        }
+        return result;
+    }
+
     private ChatSession resolveSession(Long sessionId, Long userId) {
         if (sessionId == null) {
             User user = userRepository.findById(userId)
