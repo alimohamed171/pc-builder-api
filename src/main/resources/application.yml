@@ -6,10 +6,11 @@ spring:
     name: pc-builder-api
 
   datasource:
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:pc_bundle}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-    username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:1234}
+    url: jdbc:mysql://${MYSQLHOST:localhost}:${MYSQLPORT:3306}/${MYSQL_DATABASE:pc_bundle}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${MYSQLUSER:root}
+    password: ${MYSQLPASSWORD:1234}
     driver-class-name: com.mysql.cj.jdbc.Driver
+
 
   jpa:
     hibernate:
@@ -32,8 +33,8 @@ spring:
             model: llama-3.3-70b-versatile
 app:
   jwt:
-    secret: ${JWT_SECRET}
-    expiration-ms: ${JWT_EXPIRATION_MS}
+    secret: ${JWT_SECRET:9f7d2c8e4b1a6d3f5e8c0a7b9d2e4f6a8c1b3d5e7f9a2c4e6b8d0f2a4c6e8b1}
+    expiration-ms: ${JWT_EXPIRATION_MS:31536000000}
   bundle:
     default-min-psu-headroom-watts: ${PSU_HEADROOM_WATTS:150}
     default-gpu-draw-watts: ${DEFAULT_GPU_DRAW_WATTS:250}
