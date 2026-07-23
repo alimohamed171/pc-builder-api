@@ -1,20 +1,17 @@
 package com.pcbuilder.ai.service;
 
-import com.pcbuilder.ai.client.GeminiClient;
-import com.pcbuilder.ai.dto.gemini.GeminiContent;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pcbuilder.ai.dto.request.BuildGeneratorRequest;
 import com.pcbuilder.ai.dto.response.BuildGeneratorResponse;
 import com.pcbuilder.ai.exception.AiServiceException;
 import com.pcbuilder.bundle.dto.CompatibilityResult;
 import com.pcbuilder.bundle.service.CompatibilityService;
-import com.pcbuilder.common.SpecsUtil;
 import com.pcbuilder.product.entity.Product;
 import com.pcbuilder.product.entity.ProductCategory;
-import com.pcbuilder.product.repository.ProductRepository;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -29,27 +26,27 @@ public class BuildGeneratorAiService {
     private static final String SYSTEM_INSTRUCTION = """
         You are a PC build generator for pcbuilder, an Egyptian hardware
         e-commerce platform. You will be given a list of AVAILABLE PRODUCTS
-        (id, category, name, price in EGP, key specs) and a user's request.
+        (id, category, name, price in EGP) and a user's request.
         Pick exactly one product for each of these categories when relevant
         to the request: CPU, MOTHERBOARD, GPU, PSU, CASE, COOLER, MEMORY.
         Only choose from the given product IDs - never invent products.
-        Respect socket compatibility (CPU socket must equal motherboard socket)
-        and stay within budget when given.
-        Respond ONLY with valid JSON, no extra text, in this exact shape:
+        Respect socket compatibility (CPU socket must equal motherboard socket,
+        inferred from the product names) and stay within budget when given.
+        Respond ONLY with raw JSON, no extra text, no markdown code fences,
+        no ```json wrapper - just the JSON object itself, in this exact shape:
         {
           "picks": [{"category": "CPU", "productId": 123}],
           "reasoning": "short explanation of the choices"
         }
         """;
 
-    private final ProductRepository productRepository;
+    private final ProductCatalogCache productCatalogCache;
     private final CompatibilityService compatibilityService;
-    private final GeminiClient geminiClient;
+    private final ChatClient chatClient;
     private final ObjectMapper objectMapper;
 
     public BuildGeneratorResponse generate(BuildGeneratorRequest request) {
         List<Product> candidates = loadCandidatePool();
-
         String catalogText = buildCatalogText(candidates);
 
         String userPrompt = """
@@ -68,8 +65,13 @@ public class BuildGeneratorAiService {
                 catalogText
         );
 
-        List<GeminiContent> contents = List.of(GeminiContent.of("user", userPrompt));
-        String json = geminiClient.generateJson(SYSTEM_INSTRUCTION, contents);
+        String rawJson = chatClient.prompt()
+                .system(SYSTEM_INSTRUCTION)
+                .user(userPrompt)
+                .call()
+                .content();
+
+        String json = stripMarkdownCodeFence(rawJson);
 
         List<Product> pickedProducts = parseAndResolvePicks(json, candidates);
 
@@ -87,7 +89,7 @@ public class BuildGeneratorAiService {
                 .map(p -> new BuildGeneratorResponse.ComponentPick(
                         p.getCategory().name(),
                         p.getId(),
-                        p.getMatchedGlobalName() != null ? p.getMatchedGlobalName() : p.getRawName(),
+                        p.getRawName(),
                         p.getPriceEgp()))
                 .collect(Collectors.toList());
 
@@ -109,10 +111,11 @@ public class BuildGeneratorAiService {
 
         List<Product> pool = new ArrayList<>();
         for (ProductCategory category : categories) {
-            List<Product> inCategory = productRepository.findByCategory(category).stream()
+            List<Product> inCategory = productCatalogCache.getByCategory(category).stream()
                     .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                    .filter(p -> looksLikeValidCategoryMatch(p, category))
                     .sorted(Comparator.comparing(Product::getPriceEgp))
-                    .limit(25)
+                    .limit(8)
                     .collect(Collectors.toList());
             pool.addAll(inCategory);
         }
@@ -124,9 +127,8 @@ public class BuildGeneratorAiService {
         for (Product p : candidates) {
             sb.append("id=").append(p.getId())
                     .append(", category=").append(p.getCategory())
-                    .append(", name=").append(p.getMatchedGlobalName() != null ? p.getMatchedGlobalName() : p.getRawName())
+                    .append(", name=").append(p.getRawName())
                     .append(", price=").append(p.getPriceEgp())
-                    .append(", specs=").append(SpecsUtil.parse(p.getSpecs()))
                     .append("\n");
         }
         return sb.toString();
@@ -150,12 +152,12 @@ public class BuildGeneratorAiService {
                 if (product != null) {
                     resolved.add(product);
                 } else {
-                    log.warn("Gemini picked productId={} which is not in the candidate pool - skipping", productId);
+                    log.warn("AI picked productId={} which is not in the candidate pool - skipping", productId);
                 }
             }
             return resolved;
         } catch (Exception e) {
-            log.error("Failed to parse Gemini build-generator JSON: {}", json, e);
+            log.error("Failed to parse AI build-generator JSON: {}", json, e);
             throw new AiServiceException("Failed to parse AI build suggestion", e);
         }
     }
@@ -168,5 +170,37 @@ public class BuildGeneratorAiService {
         } catch (Exception e) {
             return "";
         }
+    }
+
+    /**
+     * Some models (notably Llama via Groq) wrap JSON output in markdown code
+     * fences (```json ... ```) even when explicitly told to return raw JSON.
+     * Strip these before parsing rather than letting them break Jackson.
+     */
+    private String stripMarkdownCodeFence(String text) {
+        String trimmed = text.trim();
+        if (trimmed.startsWith("```")) {
+            int firstNewline = trimmed.indexOf('\n');
+            if (firstNewline != -1) {
+                trimmed = trimmed.substring(firstNewline + 1);
+            }
+            int lastFence = trimmed.lastIndexOf("```");
+            if (lastFence != -1) {
+                trimmed = trimmed.substring(0, lastFence);
+            }
+        }
+        return trimmed.trim();
+    }
+
+    private boolean looksLikeValidCategoryMatch(Product p, ProductCategory expectedCategory) {
+        String name = p.getRawName().toLowerCase();
+        return switch (expectedCategory) {
+            case GPU -> name.contains("rtx") || name.contains("gtx") || name.contains("radeon")
+                    || name.contains("geforce") || name.contains("rx ") || name.contains("graphics card");
+            case CPU -> name.contains("ryzen") || name.contains("core i") || name.contains("processor");
+            case PSU -> name.contains("psu") || name.contains("power supply") || name.contains("watt")
+                    || name.matches(".*\\d+w.*");
+            default -> true;
+        };
     }
 }

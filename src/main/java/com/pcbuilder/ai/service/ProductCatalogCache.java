@@ -3,7 +3,6 @@ package com.pcbuilder.ai.service;
 import com.pcbuilder.product.entity.Product;
 import com.pcbuilder.product.entity.ProductCategory;
 import com.pcbuilder.product.repository.ProductRepository;
-import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -14,11 +13,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
-/**
- * Holds the entire in-stock product catalog in memory, grouped by category.
- * Refreshed periodically instead of hitting the database on every chat
- * request - this is what eliminates repeated DB load for AI tool calls.
- */
 @Component
 @RequiredArgsConstructor
 @Slf4j
@@ -29,12 +23,7 @@ public class ProductCatalogCache {
     private final AtomicReference<Map<ProductCategory, List<Product>>> catalog =
             new AtomicReference<>(Map.of());
 
-    @PostConstruct
-    public void init() {
-        refresh();
-    }
-
-    @Scheduled(fixedRate = 10 * 60 * 1000) // refresh every 10 minutes
+    @Scheduled(initialDelay = 0, fixedRate = 10 * 60 * 1000)
     public void refresh() {
         log.info("Refreshing in-memory product catalog...");
         List<Product> all = productRepository.findAll().stream()

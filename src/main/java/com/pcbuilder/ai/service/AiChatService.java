@@ -351,6 +351,7 @@ public class AiChatService {
 
         for (ProductCategory cat : validCats) {
             List<Product> sorted = groupedProducts.getOrDefault(cat, List.of()).stream()
+                    .filter(p -> looksLikeValidCategoryMatch(p, cat))
                     .sorted(Comparator.comparing(Product::getPriceEgp))
                     .collect(Collectors.toList());
             List<Product> products = selectSpreadSample(sorted, 5);
