@@ -42,6 +42,10 @@ public class Bundle {
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt = LocalDateTime.now();
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private BundleType type;
+
     public void addItem(BundleItem item) {
         item.setBundle(this);
         items.add(item);

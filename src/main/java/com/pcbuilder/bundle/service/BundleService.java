@@ -5,6 +5,7 @@ import com.pcbuilder.auth.repository.UserRepository;
 import com.pcbuilder.bundle.dto.*;
 import com.pcbuilder.bundle.entity.Bundle;
 import com.pcbuilder.bundle.entity.BundleItem;
+import com.pcbuilder.bundle.entity.BundleType;
 import com.pcbuilder.bundle.mapper.BundleMapper;
 import com.pcbuilder.bundle.repository.BundleRepository;
 import com.pcbuilder.exception.BadRequestException;
@@ -52,6 +53,7 @@ public class BundleService {
         Bundle bundle = new Bundle();
         bundle.setUser(user);
         bundle.setName(request.getName());
+        bundle.setType(request.getType());
         applyItems(bundle, request, products);
         bundle.setCompatible(compatibilityResult.isCompatible());
 
@@ -70,6 +72,7 @@ public class BundleService {
 
         bundle.clearItems();
         bundle.setName(request.getName());
+        bundle.setType(request.getType());
         applyItems(bundle, request, products);
         bundle.setCompatible(compatibilityResult.isCompatible());
         bundle.setUpdatedAt(LocalDateTime.now());
@@ -87,10 +90,12 @@ public class BundleService {
     }
 
     @Transactional(readOnly = true)
-    public Page<BundleResponseDto> getUserBundles(Long userId, int page, int size) {
+    public Page<BundleResponseDto> getUserBundles(Long userId, BundleType type, int page, int size) {
         Pageable pageable = PageRequest.of(Math.max(page, 0), size <= 0 ? 20 : Math.min(size, 100));
-        return bundleRepository.findByUserId(userId, pageable)
-                .map(b -> bundleMapper.toResponseDto(b, null));
+        Page<Bundle> bundles = (type != null)
+                ? bundleRepository.findByUserIdAndType(userId, type, pageable)
+                : bundleRepository.findByUserId(userId, pageable);
+        return bundles.map(b -> bundleMapper.toResponseDto(b, null));
     }
 
     // ---------------------------------------------------------------

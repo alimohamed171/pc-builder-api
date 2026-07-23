@@ -1,5 +1,6 @@
 package com.pcbuilder.bundle.dto;
 
+import com.pcbuilder.bundle.entity.BundleType;
 import com.pcbuilder.product.dto.ProductDto;
 import lombok.Getter;
 import lombok.Setter;
@@ -15,6 +16,8 @@ public class BundleResponseDto {
 
     private Long id;
     private String name;
+    private BundleType type;
+    private String typeDisplayName;
     private BigDecimal totalPrice;
     private boolean compatible;
     private List<BundleItemDto> items;
