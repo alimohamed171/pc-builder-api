@@ -1,15 +1,13 @@
 package com.pcbuilder.ai.dto.request;
 
-import jakarta.validation.constraints.NotEmpty;
 import lombok.Data;
 
 import java.util.List;
 
 @Data
 public class CompatibilityCheckRequest {
-
-    @NotEmpty
-    private List<Long> componentIds;
-
-    private String note;
+    private Long buildId;
+    private List<Long> existingComponentIds;
+    private Long candidateComponentId;
+    private String mode;
 }

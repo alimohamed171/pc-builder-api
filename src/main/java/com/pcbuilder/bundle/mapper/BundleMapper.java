@@ -3,6 +3,7 @@ package com.pcbuilder.bundle.mapper;
 import com.pcbuilder.bundle.dto.*;
 import com.pcbuilder.bundle.entity.Bundle;
 import com.pcbuilder.bundle.entity.BundleItem;
+import com.pcbuilder.common.JsonUtil;
 import com.pcbuilder.product.mapper.ProductMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -30,6 +31,8 @@ public class BundleMapper {
         dto.setPrice(item.getProduct().getPriceEgp());
         dto.setQuantity(item.getQuantity());
         dto.setSubtotal(item.getProduct().getPriceEgp().multiply(BigDecimal.valueOf(item.getQuantity())));
+        dto.setImageUrl(item.getProduct().getImageUrl());
+        dto.setImages(JsonUtil.parseList(item.getProduct().getImages()));
         return dto;
     }
 

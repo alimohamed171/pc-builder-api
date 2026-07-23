@@ -16,25 +16,25 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 public class AiController {
 
-    private final AiChatService aiChatService;
-    private final BuildGeneratorAiService buildGeneratorAiService;
+//    private final AiChatService aiChatService;
+//    private final BuildGeneratorAiService buildGeneratorAiService;
     private final CompareBuildsAiService compareBuildsAiService;
     private final CompatibilityAiService compatibilityAiService;
 
-    @PostMapping("/chat")
-    public ResponseEntity<ApiResponse<ChatResponse>> chat(
-            @Valid @RequestBody ChatRequest request,
-            @AuthenticationPrincipal UserPrincipal principal) {
-        ChatResponse response = aiChatService.chat(request, principal.getId());
-        return ResponseEntity.ok(ApiResponse.success(response));
-    }
-
-    @PostMapping("/build-generator")
-    public ResponseEntity<ApiResponse<BuildGeneratorResponse>> generateBuild(
-            @Valid @RequestBody BuildGeneratorRequest request) {
-        BuildGeneratorResponse response = buildGeneratorAiService.generate(request);
-        return ResponseEntity.ok(ApiResponse.success(response));
-    }
+//    @PostMapping("/chat")
+//    public ResponseEntity<ApiResponse<ChatResponse>> chat(
+//            @Valid @RequestBody ChatRequest request,
+//            @AuthenticationPrincipal UserPrincipal principal) {
+//        ChatResponse response = aiChatService.chat(request, principal.getId());
+//        return ResponseEntity.ok(ApiResponse.success(response));
+//    }
+//
+//    @PostMapping("/build-generator")
+//    public ResponseEntity<ApiResponse<BuildGeneratorResponse>> generateBuild(
+//            @Valid @RequestBody BuildGeneratorRequest request) {
+//        BuildGeneratorResponse response = buildGeneratorAiService.generate(request);
+//        return ResponseEntity.ok(ApiResponse.success(response));
+//    }
 
     @PostMapping("/compare-builds")
     public ResponseEntity<ApiResponse<CompareBuildsResponse>> compareBuilds(
@@ -46,8 +46,9 @@ public class AiController {
 
     @PostMapping("/compatibility-check")
     public ResponseEntity<ApiResponse<CompatibilityCheckResponse>> checkCompatibility(
-            @Valid @RequestBody CompatibilityCheckRequest request) {
-        CompatibilityCheckResponse response = compatibilityAiService.check(request);
+            @Valid @RequestBody CompatibilityCheckRequest request,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        CompatibilityCheckResponse response = compatibilityAiService.check(request, principal.getId());
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 }

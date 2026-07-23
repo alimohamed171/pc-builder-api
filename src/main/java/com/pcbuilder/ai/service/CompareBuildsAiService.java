@@ -1,7 +1,6 @@
 package com.pcbuilder.ai.service;
 
-import com.pcbuilder.ai.client.GeminiClient;
-import com.pcbuilder.ai.dto.gemini.GeminiContent;
+
 import com.pcbuilder.ai.dto.request.CompareBuildsRequest;
 import com.pcbuilder.ai.dto.response.CompareBuildsResponse;
 import com.pcbuilder.bundle.entity.Bundle;
@@ -10,6 +9,7 @@ import com.pcbuilder.bundle.repository.BundleRepository;
 import com.pcbuilder.exception.BadRequestException;
 import com.pcbuilder.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -70,7 +70,7 @@ public class CompareBuildsAiService {
     private static final String RECOMMENDATION_MARKER = "RECOMMENDATION:";
 
     private final BundleRepository bundleRepository;
-    private final GeminiClient geminiClient;
+    private final ChatClient chatClient;
 
     public CompareBuildsResponse compare(CompareBuildsRequest request, Long userId) {
         List<Bundle> bundles = request.getBuildIds().stream().map(id -> bundleRepository.findByIdAndUserId(id, userId).orElseThrow(() -> new ResourceNotFoundException("Bundle not found: id=" + id))).collect(Collectors.toList());
@@ -80,8 +80,15 @@ public class CompareBuildsAiService {
         }
 
         String buildsSummary = buildSummary(bundles);
-        List<GeminiContent> contents = List.of(GeminiContent.of("user", buildsSummary));
-        String aiReply = geminiClient.generateText(SYSTEM_INSTRUCTION, contents);
+        String aiReply =
+                chatClient.prompt()
+                        .system(SYSTEM_INSTRUCTION)
+                        .user(buildsSummary)
+                        .call()
+                        .content();
+        if (aiReply == null) {
+            throw new RuntimeException("AI service returned null response");
+        }
 
         String differencesSection = extractSection(aiReply, DIFFERENCES_MARKER, RECOMMENDATION_MARKER);
         String recommendation = extractSection(aiReply, RECOMMENDATION_MARKER, null);
