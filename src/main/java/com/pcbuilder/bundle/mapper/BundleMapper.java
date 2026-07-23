@@ -40,6 +40,8 @@ public class BundleMapper {
         BundleResponseDto dto = new BundleResponseDto();
         dto.setId(bundle.getId());
         dto.setName(bundle.getName());
+        dto.setType(bundle.getType());
+        dto.setTypeDisplayName(bundle.getType() != null ? bundle.getType().getDisplayName() : null);
         dto.setTotalPrice(bundle.getTotalPrice());
         dto.setCompatible(bundle.isCompatible());
         dto.setCreatedAt(bundle.getCreatedAt());

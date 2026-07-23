@@ -2,6 +2,7 @@ package com.pcbuilder.bundle.controller;
 
 import com.pcbuilder.bundle.dto.BundleResponseDto;
 import com.pcbuilder.bundle.dto.BundleSaveRequest;
+import com.pcbuilder.bundle.entity.BundleType;
 import com.pcbuilder.bundle.service.BundleService;
 import com.pcbuilder.common.ApiResponse;
 import com.pcbuilder.common.PageResponse;
@@ -53,14 +54,18 @@ public class BundleController {
         return ResponseEntity.ok(ApiResponse.success("Bundle fetched successfully", bundle));
     }
 
-    /** Retrieve all bundles owned by the current user, paginated. */
+    /**
+     * Retrieve all bundles owned by the current user, paginated.
+     * Optionally filter by type (e.g. /api/bundles?type=GAMING); if omitted, all types are returned.
+     */
     @GetMapping
     public ResponseEntity<ApiResponse<PageResponse<BundleResponseDto>>> getMyBundles(
             @AuthenticationPrincipal UserPrincipal principal,
+            @RequestParam(required = false) BundleType type,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
 
-        Page<BundleResponseDto> bundles = bundleService.getUserBundles(principal.getId(), page, size);
+        Page<BundleResponseDto> bundles = bundleService.getUserBundles(principal.getId(), type, page, size);
         return ResponseEntity.ok(ApiResponse.success("Bundles fetched successfully", PageResponse.from(bundles)));
     }
 }

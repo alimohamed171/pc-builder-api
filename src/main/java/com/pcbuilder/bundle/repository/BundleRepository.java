@@ -1,6 +1,7 @@
 package com.pcbuilder.bundle.repository;
 
 import com.pcbuilder.bundle.entity.Bundle;
+import com.pcbuilder.bundle.entity.BundleType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
@@ -10,6 +11,8 @@ import java.util.Optional;
 
 public interface BundleRepository extends JpaRepository<Bundle, Long> {
     Page<Bundle> findByUserId(Long userId, Pageable pageable);
+
+    Page<Bundle> findByUserIdAndType(Long userId, BundleType type, Pageable pageable);
 
     @EntityGraph(attributePaths = {"items", "items.product"})
     Optional<Bundle> findByIdAndUserId(Long id, Long userId);

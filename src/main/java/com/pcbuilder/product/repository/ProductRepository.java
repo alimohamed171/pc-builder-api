@@ -19,6 +19,8 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
 
     List<Product> findByIdIn(List<Long> ids);
 
+    List<Product> findByCategoryIn(List<ProductCategory> categories);
+
     @Query("""
             SELECT p FROM Product p
             WHERE (:category IS NULL OR p.category = :category)
@@ -29,11 +31,11 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
               AND (:inStockOnly = false OR p.inStock = true)
             """)
     Page<Product> search(@Param("category") ProductCategory category,
-                          @Param("minPrice") BigDecimal minPrice,
-                          @Param("maxPrice") BigDecimal maxPrice,
-                          @Param("keyword") String keyword,
-                          @Param("inStockOnly") boolean inStockOnly,
-                          Pageable pageable);
+                         @Param("minPrice") BigDecimal minPrice,
+                         @Param("maxPrice") BigDecimal maxPrice,
+                         @Param("keyword") String keyword,
+                         @Param("inStockOnly") boolean inStockOnly,
+                         Pageable pageable);
 
     @Query(value = "SELECT * FROM products WHERE in_stock = 1 ORDER BY RAND() LIMIT :limit", nativeQuery = true)
     List<Product> findRandomDeals(@Param("limit") int limit);
