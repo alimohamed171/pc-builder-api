@@ -38,6 +38,11 @@ public class BuildGeneratorAiService {
           "picks": [{"category": "CPU", "productId": 123}],
           "reasoning": "short explanation of the choices"
         }
+        When a budget is given, choose components that make good use of that
+        budget - do not default to the cheapest option in every category unless
+        explicitly asked for the cheapest possible build. A build using less than
+        70% of the stated budget is under-using it; prefer better components that
+        still fit within budget.
         """;
 
     private final ProductCatalogCache productCatalogCache;
@@ -46,7 +51,7 @@ public class BuildGeneratorAiService {
     private final ObjectMapper objectMapper;
 
     public BuildGeneratorResponse generate(BuildGeneratorRequest request) {
-        List<Product> candidates = loadCandidatePool();
+        List<Product> candidates = loadCandidatePool(request.getUsage());
         String catalogText = buildCatalogText(candidates);
 
         String userPrompt = """
@@ -103,7 +108,7 @@ public class BuildGeneratorAiService {
         );
     }
 
-    private List<Product> loadCandidatePool() {
+    private List<Product> loadCandidatePool(String usage) {
         List<ProductCategory> categories = List.of(
                 ProductCategory.CPU, ProductCategory.MOTHERBOARD, ProductCategory.GPU,
                 ProductCategory.PSU, ProductCategory.CASE, ProductCategory.COOLER, ProductCategory.MEMORY
@@ -114,8 +119,10 @@ public class BuildGeneratorAiService {
             List<Product> inCategory = productCatalogCache.getByCategory(category).stream()
                     .filter(p -> Boolean.TRUE.equals(p.getInStock()))
                     .filter(p -> looksLikeValidCategoryMatch(p, category))
+                    .filter(p -> !(category == ProductCategory.GPU && "GAMING".equalsIgnoreCase(usage)
+                            && p.getPriceEgp().doubleValue() < 2500))
                     .sorted(Comparator.comparing(Product::getPriceEgp))
-                    .limit(8)
+                    .limit(15)
                     .collect(Collectors.toList());
             pool.addAll(inCategory);
         }
@@ -200,6 +207,9 @@ public class BuildGeneratorAiService {
             case CPU -> name.contains("ryzen") || name.contains("core i") || name.contains("processor");
             case PSU -> name.contains("psu") || name.contains("power supply") || name.contains("watt")
                     || name.matches(".*\\d+w.*");
+            case COOLER -> name.contains("cooler") || name.contains("fan") || name.contains("aio")
+                    || name.contains("heatsink") || name.contains("liquid") || name.contains("air cooler")
+                    || name.matches(".*\\d+mm.*"); // radiator/fan sizes like 120mm, 240m
             default -> true;
         };
     }
