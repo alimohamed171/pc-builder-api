@@ -7,8 +7,10 @@ import com.pcbuilder.ai.dto.response.BuildGeneratorResponse;
 import com.pcbuilder.ai.exception.AiServiceException;
 import com.pcbuilder.bundle.dto.CompatibilityResult;
 import com.pcbuilder.bundle.service.CompatibilityService;
+import com.pcbuilder.product.dto.ProductDto;
 import com.pcbuilder.product.entity.Product;
 import com.pcbuilder.product.entity.ProductCategory;
+import com.pcbuilder.product.mapper.ProductMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -49,6 +51,7 @@ public class BuildGeneratorAiService {
     private final CompatibilityService compatibilityService;
     private final ChatClient chatClient;
     private final ObjectMapper objectMapper;
+    private final ProductMapper productMapper;
 
     public BuildGeneratorResponse generate(BuildGeneratorRequest request) {
         List<Product> candidates = loadCandidatePool(request.getUsage());
@@ -90,12 +93,8 @@ public class BuildGeneratorAiService {
                 .map(Product::getPriceEgp)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        List<BuildGeneratorResponse.ComponentPick> componentPicks = pickedProducts.stream()
-                .map(p -> new BuildGeneratorResponse.ComponentPick(
-                        p.getCategory().name(),
-                        p.getId(),
-                        p.getRawName(),
-                        p.getPriceEgp()))
+        List<ProductDto> componentPicks = pickedProducts.stream()
+                .map(productMapper::toDto)
                 .collect(Collectors.toList());
 
         String reasoning = extractReasoning(json);

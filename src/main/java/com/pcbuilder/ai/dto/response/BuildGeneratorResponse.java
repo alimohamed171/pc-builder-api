@@ -1,5 +1,6 @@
 package com.pcbuilder.ai.dto.response;
 
+import com.pcbuilder.product.dto.ProductDto;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 
@@ -9,7 +10,7 @@ import java.util.List;
 @Data
 @AllArgsConstructor
 public class BuildGeneratorResponse {
-    private List<ComponentPick> components;
+    private List<ProductDto> components;
     private BigDecimal totalPrice;
     private String reasoning;
     private boolean compatibilityOk;
