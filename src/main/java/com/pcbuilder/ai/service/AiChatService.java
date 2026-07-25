@@ -7,6 +7,7 @@ import com.pcbuilder.ai.entity.ChatSession;
 import com.pcbuilder.ai.entity.MessageRole;
 import com.pcbuilder.ai.repository.ChatMessageRepository;
 import com.pcbuilder.ai.repository.ChatSessionRepository;
+import com.pcbuilder.ai.service.util.DeterministicPcBuilder;
 import com.pcbuilder.auth.entity.User;
 import com.pcbuilder.auth.repository.UserRepository;
 import com.pcbuilder.bundle.dto.CompatibilityResult;
@@ -37,6 +38,7 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 @Slf4j
+@SuppressWarnings({"unused", "SpellCheckingInspection"})
 public class AiChatService {
 
     /** Must be a record so Spring AI can generate a JSON schema for it. */
@@ -96,6 +98,7 @@ public class AiChatService {
     private final ProductCatalogCache productCatalogCache;
     private final CompatibilityService compatibilityService;
     private final ProductMapper productMapper;
+    private final DeterministicPcBuilder deterministicPcBuilder;
 
     /** All product ids shown to the model as candidates this request (search tool). */
     private final ThreadLocal<Set<Long>> seenProductIds = ThreadLocal.withInitial(LinkedHashSet::new);
@@ -127,61 +130,67 @@ public class AiChatService {
         seenProductIds.get().clear();
         chosenBuildProducts.get().clear();
 
-        BeanOutputConverter<ChatAiResult> converter = new BeanOutputConverter<>(ChatAiResult.class);
-        String promptWithFormat = SYSTEM_INSTRUCTION + "\n\n" + converter.getFormat();
+        try {
+            BeanOutputConverter<ChatAiResult> converter = new BeanOutputConverter<>(ChatAiResult.class);
+            String promptWithFormat = SYSTEM_INSTRUCTION + "\n\n" + converter.getFormat();
 
-        String rawJson = chatClient.prompt()
-                .system(promptWithFormat)
-                .messages(conversation)
-                .tools(this)
-                .call()
-                .content();
+            String rawJson = chatClient.prompt()
+                    .system(promptWithFormat)
+                    .messages(conversation)
+                    .tools(this)
+                    .call()
+                    .content();
 
-        log.info("[AI:rawFinalResponse] {}", rawJson);
+            log.info("[AI:rawFinalResponse] {}", rawJson);
 
-        ChatAiResult parsed = parseRobustly(rawJson, converter);
+            ChatAiResult parsed = parseRobustly(rawJson, converter);
 
-        ChatMessage assistantMessage = ChatMessage.builder()
-                .session(session)
-                .role(MessageRole.ASSISTANT)
-                .content(parsed.reply())
-                .build();
-        messageRepository.save(assistantMessage);
+            ChatMessage assistantMessage = ChatMessage.builder()
+                    .session(session)
+                    .role(MessageRole.ASSISTANT)
+                    .content(parsed.reply())
+                    .build();
+            messageRepository.save(assistantMessage);
 
-        if (session.getTitle() == null) {
-            session.setTitle(truncate(request.getMessage(), 60));
+            if (session.getTitle() == null) {
+                session.setTitle(truncate(request.getMessage(), 60));
+            }
+            sessionRepository.save(session);
+
+            List<ProductDto> mentionedProducts;
+
+            List<Product> builtProducts = chosenBuildProducts.get();
+            if (!builtProducts.isEmpty()) {
+                mentionedProducts = builtProducts.stream()
+                        .map(this::mapToSanitizedDto)
+                        .collect(Collectors.toList());
+            } else {
+                Set<Long> validSeen = seenProductIds.get();
+                List<Long> validIds = parsed.mentionedProductIds().stream()
+                        .filter(validSeen::contains)
+                        .collect(Collectors.toList());
+
+                mentionedProducts = validIds.isEmpty()
+                        ? List.of()
+                        : productRepository.findByIdIn(validIds).stream()
+                        .map(this::mapToSanitizedDto)
+                        .collect(Collectors.toList());
+            }
+
+            return new ChatResponse(session.getId(), parsed.reply(), mentionedProducts, LocalDateTime.now());
+
+        } finally {
+            seenProductIds.remove();
+            chosenBuildProducts.remove();
         }
-        sessionRepository.save(session);
+    }
 
-        List<ProductDto> mentionedProducts;
-
-        List<Product> builtProducts = chosenBuildProducts.get();
-        if (!builtProducts.isEmpty()) {
-            // Deterministic build tool was used this turn - this IS the ground
-            // truth for what was recommended, no need to trust the model's
-            // self-reported ids at all.
-            mentionedProducts = builtProducts.stream()
-                    .map(productMapper::toDto)
-                    .collect(Collectors.toList());
-        } else {
-            // General search path: only trust ids the model explicitly listed,
-            // validated against what was actually shown to it.
-            Set<Long> validSeen = seenProductIds.get();
-            List<Long> validIds = parsed.mentionedProductIds().stream()
-                    .filter(validSeen::contains)
-                    .collect(Collectors.toList());
-
-            mentionedProducts = validIds.isEmpty()
-                    ? List.of()
-                    : productRepository.findByIdIn(validIds).stream()
-                    .map(productMapper::toDto)
-                    .collect(Collectors.toList());
-        }
-
-        seenProductIds.remove();
-        chosenBuildProducts.remove();
-
-        return new ChatResponse(session.getId(), parsed.reply(), mentionedProducts, LocalDateTime.now());
+    /** Helper method eliminating code duplication for DTO mapping and global spec sanitization. */
+    private ProductDto mapToSanitizedDto(Product product) {
+        ProductDto dto = productMapper.toDto(product);
+        dto.setMatchedGlobalName(product.getRawName());
+        dto.setSpecs(new HashMap<>());
+        return dto;
     }
 
     private ChatAiResult parseRobustly(String rawOutput, BeanOutputConverter<ChatAiResult> converter) {
@@ -191,7 +200,7 @@ public class AiChatService {
             log.warn("LLM generated invalid JSON. Salvaging text. Raw: {}", rawOutput);
             String cleanText = rawOutput;
 
-            if (rawOutput.contains("\"reply\"")) {
+            if (rawOutput != null && rawOutput.contains("\"reply\"")) {
                 try {
                     String[] parts = rawOutput.split("\"reply\"\\s*:\\s*\"", 2);
                     if (parts.length > 1) {
@@ -205,76 +214,24 @@ public class AiChatService {
                 }
             }
 
-            if (cleanText.startsWith("{")) {
+            if (cleanText != null && cleanText.startsWith("{")) {
                 cleanText = cleanText.replaceAll("[{}]", "").trim();
             }
 
-            return new ChatAiResult(cleanText, new ArrayList<>());
+            return new ChatAiResult(cleanText != null ? cleanText : "", new ArrayList<>());
         }
     }
 
-    /**
-     * Deterministic budget-based build tool. Splits the given total budget
-     * across categories by fixed percentages, picks the best-fitting real,
-     * in-stock product per category (from the in-memory catalog cache - no
-     * database hit here), and returns exactly those chosen components. The
-     * model narrates this result; it never chooses the products itself.
-     *
-     * Uses rawName (the actual scraped product name) consistently, never
-     * matchedGlobalName - matchedGlobalName can be an incorrect/mismatched
-     * global-catalog guess, and using it here would make the model reason
-     * about a different product than the one actually in the database.
-     */
     @Tool(description = "Build a complete PC (CPU, Motherboard, GPU, Memory, PSU, Case, Cooler) for a given " +
             "total budget in EGP. Allocates the budget across categories and picks real, in-stock, " +
             "in-budget components automatically. Call this ONCE, only after you know the user's budget.")
     public String buildPcForBudget(
             @ToolParam(description = "Total budget in EGP for the whole PC build") Double budget) {
 
-        if (budget == null || budget <= 0) {
-            return "{\"error\":\"invalid budget\"}";
-        }
-
-        Map<ProductCategory, Double> allocation = new LinkedHashMap<>();
-        allocation.put(ProductCategory.CPU, 0.22);
-        allocation.put(ProductCategory.MOTHERBOARD, 0.14);
-        allocation.put(ProductCategory.GPU, 0.32);
-        allocation.put(ProductCategory.MEMORY, 0.10);
-        allocation.put(ProductCategory.PSU, 0.09);
-        allocation.put(ProductCategory.CASE, 0.08);
-        allocation.put(ProductCategory.COOLER, 0.05);
-
-        List<Product> picks = new ArrayList<>();
-
-        for (Map.Entry<ProductCategory, Double> entry : allocation.entrySet()) {
-            ProductCategory cat = entry.getKey();
-            double subBudget = budget * entry.getValue();
-
-            List<Product> candidates = productCatalogCache.getByCategory(cat).stream()
-                    .filter(p -> Boolean.TRUE.equals(p.getInStock()))
-                    .filter(p -> looksLikeValidCategoryMatch(p, cat))
-                    .sorted(Comparator.comparing(Product::getPriceEgp))
-                    .collect(Collectors.toList());
-
-            if (candidates.isEmpty()) continue;
-
-            Product chosen = null;
-            for (Product p : candidates) {
-                if (p.getPriceEgp().doubleValue() <= subBudget) {
-                    chosen = p;
-                } else {
-                    break;
-                }
-            }
-            if (chosen == null) {
-                chosen = candidates.get(0);
-            }
-
-            picks.add(chosen);
-        }
+        List<Product> picks = deterministicPcBuilder.buildPcForBudget(budget, null);
 
         if (picks.isEmpty()) {
-            return "{\"error\":\"no products available to build\"}";
+            return "{\"error\":\"invalid budget or no products available\"}";
         }
 
         chosenBuildProducts.get().clear();
@@ -282,7 +239,6 @@ public class AiChatService {
         picks.forEach(p -> seenProductIds.get().add(p.getId()));
 
         CompatibilityResult compatibilityResult = compatibilityService.evaluate(picks);
-
         BigDecimal total = picks.stream()
                 .map(Product::getPriceEgp)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -310,11 +266,6 @@ public class AiChatService {
         return result;
     }
 
-    /**
-     * General single-category search tool, used only for specific questions
-     * that aren't a full build request (e.g. "what CPUs under 3000 EGP").
-     * Uses rawName consistently, same reasoning as buildPcForBudget above.
-     */
     @Tool(description = "Search the real-time product catalog for ONE OR MORE hardware categories. " +
             "Use only for specific category questions, not for full build requests.")
     public String searchProducts(
@@ -387,6 +338,7 @@ public class AiChatService {
         return result;
     }
 
+    @SuppressWarnings("SameParameterValue")
     private List<Product> selectSpreadSample(List<Product> sorted, int limit) {
         if (sorted.size() <= limit) {
             return sorted;
@@ -412,6 +364,7 @@ public class AiChatService {
                 .orElseThrow(() -> new ResourceNotFoundException("Chat session not found"));
     }
 
+    @SuppressWarnings("SameParameterValue")
     private String truncate(String text, int max) {
         return text.length() <= max ? text : text.substring(0, max) + "...";
     }
@@ -424,6 +377,9 @@ public class AiChatService {
             case CPU -> name.contains("ryzen") || name.contains("core i") || name.contains("processor");
             case PSU -> name.contains("psu") || name.contains("power supply") || name.contains("watt")
                     || name.matches(".*\\d+w.*");
+            case COOLER -> name.contains("cooler") || name.contains("fan") || name.contains("aio")
+                    || name.contains("heatsink") || name.contains("liquid") || name.contains("air cooler")
+                    || name.matches(".*\\d+mm.*");
             default -> true;
         };
     }
