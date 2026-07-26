@@ -94,8 +94,16 @@ public class CompareBuildsAiService {
         String recommendation = extractSection(aiReply, RECOMMENDATION_MARKER, null);
 
         List<String> keyDifferences = differencesSection.lines().map(String::trim).filter(line -> line.startsWith("-")).map(line -> line.replaceFirst("^-\\s*", "")).filter(line -> !line.isBlank()).collect(Collectors.toList());
+        List<String> buildNames = bundles.stream()
+                .map(Bundle::getName)
+                .collect(Collectors.toList());
 
-        return new CompareBuildsResponse(request.getBuildIds(), aiReply, keyDifferences, recommendation.isBlank() ? null : recommendation);
+        return new CompareBuildsResponse(
+                buildNames,
+                aiReply,
+                keyDifferences,
+                recommendation.isBlank() ? null : recommendation
+        );
     }
 
     private String extractSection(String text, String startMarker, String endMarker) {
@@ -114,9 +122,13 @@ public class CompareBuildsAiService {
     private String buildSummary(List<Bundle> bundles) {
         StringBuilder sb = new StringBuilder();
         for (Bundle bundle : bundles) {
-            sb.append("Build #").append(bundle.getId()).append(" \"").append(bundle.getName()).append("\"").append(" | total price: ").append(bundle.getTotalPrice()).append(" EGP").append(" | compatible: ").append(bundle.isCompatible()).append("\nComponents:\n");
+            sb.append("Build Name: \"").append(bundle.getName()).append("\"")
+                    .append(" | total price: ").append(bundle.getTotalPrice()).append(" EGP")
+                    .append(" | compatible: ").append(bundle.isCompatible()).append("\nComponents:\n");
             for (BundleItem item : bundle.getItems()) {
-                sb.append("  - ").append(item.getProduct().getCategory()).append(": ").append(item.getProduct().getMatchedGlobalName() != null ? item.getProduct().getMatchedGlobalName() : item.getProduct().getRawName()).append(" (qty ").append(item.getQuantity()).append(")\n");
+                sb.append("  - ").append(item.getProduct().getCategory())
+                        .append(": ").append(item.getProduct().getMatchedGlobalName() != null ? item.getProduct().getMatchedGlobalName() : item.getProduct().getRawName())
+                        .append(" (qty ").append(item.getQuantity()).append(")\n");
             }
             sb.append("\n");
         }

@@ -8,7 +8,7 @@ import java.util.List;
 @Data
 @AllArgsConstructor
 public class CompareBuildsResponse {
-    private List<Long> buildIds;
+    private List<String> buildNames;
     private String comparisonSummary;
     private List<String> keyDifferences;
     private String recommendation;
