@@ -22,7 +22,6 @@ public class DeterministicPcBuilder {
             return List.of();
         }
 
-        // Always allocate across all 7 categories including GPU
         Map<ProductCategory, Double> allocation = new LinkedHashMap<>();
         allocation.put(ProductCategory.CPU, 0.22);
         allocation.put(ProductCategory.MOTHERBOARD, 0.14);
@@ -35,7 +34,6 @@ public class DeterministicPcBuilder {
         List<Product> picks = new ArrayList<>();
         double rolloverMoney = 0.0;
 
-        // State trackers for real-time compatibility during selection
         String requiredSocket = null;
         String requiredRamType = null;
 
@@ -51,7 +49,6 @@ public class DeterministicPcBuilder {
 
             if (baseCandidates.isEmpty()) continue;
 
-            // 1. Apply Brand Filter (if provided)
             List<Product> candidates = baseCandidates;
             if (preferredBrand != null && !preferredBrand.isBlank()) {
                 List<Product> brandFiltered = baseCandidates.stream()
@@ -62,35 +59,91 @@ public class DeterministicPcBuilder {
                 }
             }
 
-            // 2. Filter Motherboards by CPU Socket
+            // --- Socket-matching for MOTHERBOARD: hard requirement, no silent fallback ---
             if (cat == ProductCategory.MOTHERBOARD && requiredSocket != null) {
-                final String targetSocket = requiredSocket;
-                List<Product> socketMatching = candidates.stream()
-                        .filter(p -> {
-                            String mbSocket = extractSocket(p);
-                            return mbSocket == null || mbSocket.equals(targetSocket);
-                        })
-                        .collect(Collectors.toList());
+                List<Product> socketMatching = filterBySocket(candidates, requiredSocket);
+
                 if (!socketMatching.isEmpty()) {
                     candidates = socketMatching;
+                } else {
+                    List<Product> fullPoolMatch = filterBySocket(
+                            productCatalogCache.getByCategory(cat).stream()
+                                    .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                                    .collect(Collectors.toList()),
+                            requiredSocket
+                    );
+                    if (!fullPoolMatch.isEmpty()) {
+                        candidates = fullPoolMatch.stream()
+                                .sorted(Comparator.comparing(Product::getPriceEgp))
+                                .collect(Collectors.toList());
+                        log.warn("No {} matching CPU socket={} within budget slice - " +
+                                "searching full catalog and may exceed sub-budget", cat, requiredSocket);
+                    } else {
+                        log.error("No motherboard found anywhere in catalog matching socket={} - " +
+                                "build will be incompatible for this category", requiredSocket);
+                    }
                 }
             }
 
-            // 3. Filter RAM by Motherboard RAM Generation
+            // --- RAM-type matching for MEMORY: same hard-requirement treatment ---
             if (cat == ProductCategory.MEMORY && requiredRamType != null) {
-                final String targetRam = requiredRamType;
-                List<Product> ramMatching = candidates.stream()
-                        .filter(p -> {
-                            String ramType = extractRamType(p);
-                            return ramType == null || ramType.equals(targetRam);
-                        })
-                        .collect(Collectors.toList());
+                List<Product> ramMatching = filterByRamType(candidates, requiredRamType);
+
                 if (!ramMatching.isEmpty()) {
                     candidates = ramMatching;
+                } else {
+                    List<Product> fullPoolMatch = filterByRamType(
+                            productCatalogCache.getByCategory(cat).stream()
+                                    .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                                    .collect(Collectors.toList()),
+                            requiredRamType
+                    );
+                    if (!fullPoolMatch.isEmpty()) {
+                        candidates = fullPoolMatch.stream()
+                                .sorted(Comparator.comparing(Product::getPriceEgp))
+                                .collect(Collectors.toList());
+                        log.warn("No {} matching RAM type={} within budget slice - " +
+                                "searching full catalog and may exceed sub-budget", cat, requiredRamType);
+                    } else {
+                        log.error("No memory found anywhere in catalog matching RAM type={}", requiredRamType);
+                    }
+                }
+
+                // Prioritize dual-channel kits over single sticks
+                candidates.sort((p1, p2) -> {
+                    boolean p1Dual = isDualChannelKit(p1);
+                    boolean p2Dual = isDualChannelKit(p2);
+                    if (p1Dual && !p2Dual) return -1;
+                    if (!p1Dual && p2Dual) return 1;
+                    return p2.getPriceEgp().compareTo(p1.getPriceEgp());
+                });
+            }
+
+            if (cat == ProductCategory.COOLER && requiredSocket != null) {
+                final String finalRequiredSocket = requiredSocket;
+                List<Product> coolerMatching = candidates.stream()
+                        .filter(p -> coolerSupportsSocket(p, finalRequiredSocket))
+                        .collect(Collectors.toList());
+
+                if (!coolerMatching.isEmpty()) {
+                    candidates = coolerMatching;
+                } else {
+                    List<Product> fullPoolMatch = productCatalogCache.getByCategory(cat).stream()
+                            .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                            .filter(p -> coolerSupportsSocket(p, finalRequiredSocket))
+                            .collect(Collectors.toList());
+                    if (!fullPoolMatch.isEmpty()) {
+                        candidates = fullPoolMatch.stream()
+                                .sorted(Comparator.comparing(Product::getPriceEgp))
+                                .collect(Collectors.toList());
+                        log.warn("No {} matching CPU socket={} within budget slice - " +
+                                "searching full catalog.", cat, requiredSocket);
+                    } else {
+                        log.error("No cooler found anywhere in catalog matching socket={}", requiredSocket);
+                    }
                 }
             }
 
-            // 4. Choose highest price component within subBudget
             Product chosen = null;
             for (Product p : candidates) {
                 if (p.getPriceEgp().doubleValue() <= subBudget) {
@@ -99,36 +152,54 @@ public class DeterministicPcBuilder {
                 }
             }
 
-            // Fallback: Pick cheapest if all exceed subBudget
             if (chosen == null) {
-                chosen = candidates.get(candidates.size() - 1);
+                chosen = candidates.stream()
+                        .min(Comparator.comparing(Product::getPriceEgp))
+                        .orElse(null);
             }
 
-// 5. Store specs from picked CPU & Motherboard for subsequent parts
+            if (chosen == null) {
+                log.error("Could not select any product for category={} - skipping", cat);
+                continue;
+            }
+
             if (cat == ProductCategory.CPU) {
                 requiredSocket = extractSocket(chosen);
             } else if (cat == ProductCategory.MOTHERBOARD) {
                 requiredRamType = extractRamType(chosen);
 
-                // NEW: Smart inference! If the Motherboard name doesn't mention DDR4/DDR5,
-                // we can deduce the required RAM entirely from the CPU Socket.
                 if (requiredRamType == null && requiredSocket != null) {
                     if (requiredSocket.equals("AM5") || requiredSocket.equals("LGA1851")) {
                         requiredRamType = "DDR5";
                     } else if (requiredSocket.equals("AM4")) {
                         requiredRamType = "DDR4";
                     }
-                    // LGA1700 and LGA1200 can be either, so we still have to rely on the title for Intel,
-                    // but this fixes 100% of AMD builds!
                 }
             }
 
-            // 6. Carry leftover money into the next category
             rolloverMoney = subBudget - chosen.getPriceEgp().doubleValue();
             picks.add(chosen);
         }
 
         return picks;
+    }
+
+    private List<Product> filterBySocket(List<Product> products, String targetSocket) {
+        return products.stream()
+                .filter(p -> {
+                    String mbSocket = extractSocket(p);
+                    return mbSocket != null && mbSocket.equals(targetSocket);
+                })
+                .collect(Collectors.toList());
+    }
+
+    private List<Product> filterByRamType(List<Product> products, String targetRam) {
+        return products.stream()
+                .filter(p -> {
+                    String ramType = extractRamType(p);
+                    return ramType != null && ramType.equals(targetRam);
+                })
+                .collect(Collectors.toList());
     }
 
     private String extractSocket(Product p) {
@@ -146,6 +217,23 @@ public class DeterministicPcBuilder {
         if (text.contains("DDR5")) return "DDR5";
         if (text.contains("DDR4")) return "DDR4";
         return null;
+    }
+
+    private boolean coolerSupportsSocket(Product p, String targetSocket) {
+        if (targetSocket == null) return true;
+        String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
+
+        String normalizedText = text.replace(" ", "");
+
+        if (targetSocket.equals("AM5")) {
+            return normalizedText.contains("AM5") || normalizedText.contains("AM4");
+        }
+        return normalizedText.contains(targetSocket);
+    }
+
+    private boolean isDualChannelKit(Product p) {
+        String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
+        return text.matches(".*\\b2\\s*[X*]\\s*\\d+\\b.*") || text.contains("KIT") || text.contains("DUAL");
     }
 
     @SuppressWarnings("SpellCheckingInspection")
