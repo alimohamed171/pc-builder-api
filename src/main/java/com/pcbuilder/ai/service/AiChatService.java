@@ -7,6 +7,7 @@ import com.pcbuilder.ai.entity.ChatSession;
 import com.pcbuilder.ai.entity.MessageRole;
 import com.pcbuilder.ai.repository.ChatMessageRepository;
 import com.pcbuilder.ai.repository.ChatSessionRepository;
+import com.pcbuilder.ai.service.util.AiSafetyGuard;
 import com.pcbuilder.ai.service.util.DeterministicPcBuilder;
 import com.pcbuilder.auth.entity.User;
 import com.pcbuilder.auth.repository.UserRepository;
@@ -112,6 +113,7 @@ public class AiChatService {
     private final CompatibilityService compatibilityService;
     private final ProductMapper productMapper;
     private final DeterministicPcBuilder deterministicPcBuilder;
+    private final AiSafetyGuard aiSafetyGuard;
 
     /** All product ids shown to the model as candidates this request (search tool). */
     private final ThreadLocal<Set<Long>> seenProductIds = ThreadLocal.withInitial(LinkedHashSet::new);
@@ -122,6 +124,30 @@ public class AiChatService {
     @Transactional
     public ChatResponse chat(ChatRequest request, Long userId) {
         ChatSession session = resolveSession(request.getSessionId(), userId);
+
+        if (aiSafetyGuard.isAdversarialInput(request.getMessage())) {
+            ChatMessage userMessage = ChatMessage.builder()
+                    .session(session)
+                    .role(MessageRole.USER)
+                    .content(request.getMessage())
+                    .build();
+            messageRepository.save(userMessage);
+
+            String refusal = aiSafetyGuard.getCannedRefusal();
+            ChatMessage assistantMessage = ChatMessage.builder()
+                    .session(session)
+                    .role(MessageRole.ASSISTANT)
+                    .content(refusal)
+                    .build();
+            messageRepository.save(assistantMessage);
+
+            if (session.getTitle() == null) {
+                session.setTitle(truncate(request.getMessage(), 60));
+            }
+            sessionRepository.save(session);
+
+            return new ChatResponse(session.getId(), refusal, List.of(), LocalDateTime.now());
+        }
 
         ChatMessage userMessage = ChatMessage.builder()
                 .session(session)
@@ -157,11 +183,12 @@ public class AiChatService {
             log.info("[AI:rawFinalResponse] {}", rawJson);
 
             ChatAiResult parsed = parseRobustly(rawJson, converter);
+            String cleanReply = aiSafetyGuard.sanitizeOutput(parsed.reply());
 
             ChatMessage assistantMessage = ChatMessage.builder()
                     .session(session)
                     .role(MessageRole.ASSISTANT)
-                    .content(parsed.reply())
+                    .content(cleanReply)
                     .build();
             messageRepository.save(assistantMessage);
 
@@ -190,7 +217,7 @@ public class AiChatService {
                         .collect(Collectors.toList());
             }
 
-            return new ChatResponse(session.getId(), parsed.reply(), mentionedProducts, LocalDateTime.now());
+            return new ChatResponse(session.getId(), cleanReply, mentionedProducts, LocalDateTime.now());
 
         } finally {
             seenProductIds.remove();
