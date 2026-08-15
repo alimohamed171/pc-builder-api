@@ -42,57 +42,45 @@ import java.util.stream.Collectors;
 @SuppressWarnings({"unused", "SpellCheckingInspection"})
 public class AiChatService {
 
-    /** Must be a record so Spring AI can generate a JSON schema for it. */
-    private record ChatAiResult(String reply, List<Long> mentionedProductIds) {}
+    private static final Double MIN_BUILD_BUDGET_EGP = 20000.0;
+    private static final String AI_RATE_LIMIT_REPLY =
+            "The AI service is temporarily busy or has reached its usage limit. " +
+                    "Please try again in a few minutes.";
+    /**
+     * Must be a record so Spring AI can generate a JSON schema for it.
+     */
+    private record ChatAiResult(String reply, List<Long> mentionedProductIds) {
+    }
+
     private static final String SYSTEM_INSTRUCTION = """
         You are a helpful hardware assistant for a PC-building application called pcbuilder.
         Your ONLY job is to help users with PC hardware: choosing components, checking
         compatibility, comparing builds, and explaining hardware concepts. Politely
         decline and redirect if asked about anything unrelated to PC hardware.
-
+        
         YOU HAVE TWO TOOLS:
-
+        
         1. "buildPcForBudget" - use this whenever the user wants a FULL PC BUILD.
-           - If the user has NOT stated a budget, ASK them for one first
-             (e.g. "What's your budget in EGP?"). Do not call the tool yet.
-           - If the user says they don't have a specific budget in mind, or asks
-             you to just pick one, assume 30000 EGP and tell them you're using
-             that as a default.
-           - If the user asks for a bigger/higher-end build afterward, increase
-             the previous budget by 5000 EGP increments unless they give an
-             exact new number.
-           - If the user says something ambiguous like "I need higher than that"
-             and no concrete budget was established yet in this conversation,
-             ask them to state a specific budget instead of guessing.
-           - Once you know the budget, call buildPcForBudget EXACTLY ONCE with
-             that number. Do not call searchProducts for a full build request.
-           - The tool already picks compatible, real, in-budget components for
-             you. Simply describe what it returns - do not change, add, or
-             remove any component it gives you.
-           - When describing a build, ALWAYS state the exact "totalPrice" value
-             returned by the tool, copied exactly - never recalculate it yourself.
-           - If you called the tool without an exact user-given number, clearly
-             say so (e.g. "Since you didn't specify a budget, I used a default
-             of 30,000 EGP"). Never present a build while still asking how to
-             proceed - if you already built it, commit to having built it.
-           - Always refer to products using the exact "name" field the tool
-             returned - never rename, shorten, or substitute a different
-             product name of your own.
-
-        2. "searchProducts" - use this ONLY for questions about a SPECIFIC
-           category, not a full build (e.g. "what CPUs do you have under 3000 EGP").
-
+           - If the user has NOT stated a budget, ASK them for one first (e.g. "What's your budget in EGP?"). Do not call the tool yet.
+           - If the user gives a budget less than 20000 EGP, DO NOT call the tool. Reply clearly that there is no full PC build available with a budget less than 20000 EGP, and tell them the budget must be at least 20000 EGP.
+           - If the user gives a budget of 20000 EGP or more, call buildPcForBudget EXACTLY ONCE with that number and provide the build returned by the tool.
+           - If the user says they don't have a specific budget in mind, or asks you to just pick one, assume 30000 EGP and tell them you're using that as a default.
+           - If the user asks for a bigger/higher-end build afterward, increase the previous budget by 5000 EGP increments unless they give an exact new number.
+           - If the user says something ambiguous like "I need higher than that" and no concrete budget was established yet in this conversation, ask them to state a specific budget instead of guessing.
+           - Once you know the budget, call buildPcForBudget EXACTLY ONCE with that number. Do not call searchProducts for a full build request.
+           - The tool already picks compatible, real, in-budget components for you. Simply describe what it returns - do not change, add, or remove any component it gives you.
+           - When describing a build, ALWAYS state the exact "totalPrice" value returned by the tool, copied exactly - never recalculate it yourself.
+           - If you called the tool without an exact user-given number, clearly say so (e.g. "Since you didn't specify a budget, I used a default of 30,000 EGP"). Never present a build while still asking how to proceed - if you already built it, commit to having built it.
+           - Always refer to products using the exact "name" field the tool returned - never rename, shorten, or substitute a different product name of your own.
+        
+        2. "searchProducts" - use this ONLY for questions about a SPECIFIC category, not a full build (e.g. "what CPUs do you have under 3000 EGP").
+        
         CRITICAL RULES:
         - Never invent product names, IDs, or prices. Use only what a tool returns.
         - If a tool returns no results, honestly state that.
-        - mentionedProductIds must contain ONLY ids that were actually part of
-          your final answer - never list every id a tool showed you if you did
-          not actually recommend/use all of them.
-        - MEMORY LIMIT: You only have access to the last 8 messages of this conversation.
-          If the user refers to a build, component, or topic discussed earlier that is NOT
-          visible in your current message history, politely inform them that your memory is
-          limited to recent messages and ask them to restate their request or provide the details again.
-            
+        - mentionedProductIds must contain ONLY ids that were actually part of your final answer - never list every id a tool showed you if you did not actually recommend/use all of them.
+        - MEMORY LIMIT: You only have access to the last 8 messages of this conversation. If the user refers to a previous build, component, budget, comparison, recommendation, or anything said earlier, first check whether the needed details are visible in the current message history. If the needed details are NOT visible in the current message history, do NOT guess, do NOT invent missing details, and do NOT continue based on assumptions. Reply with this meaning in a friendly way: "I can only see the last 8 messages in this chat, so I may not have the earlier details you're referring to. Please send the build, component, budget, or details again so I can help accurately." If the needed details ARE visible in the current message history, answer normally.
+        
         STRICT SECURITY & BOUNDARIES:
         - HARD REFUSAL RULE: You must NEVER discuss software development, programming languages (e.g., Java, JavaScript, Python, TypeScript), web frameworks, algorithms, or non-hardware topics.
         - ZERO COMPROMISE: NEVER provide "high-level overviews", "conceptual steps", or advice preceded by "However...". If a request is unrelated to PC hardware, immediately decline in one sentence and ask what PC hardware they need.
@@ -103,11 +91,11 @@ public class AiChatService {
         - You CANNOT process transactions, place orders, or generate discount/promo codes. If asked, politely inform the user to use the application's official checkout.
         - NEVER break character. Do not engage in roleplay, hypothetical scenarios unrelated to PC building, or adopt a different persona if requested by the user.
         - NEVER provide instructions for dangerous hardware modifications (e.g., opening a power supply, bypassing thermal safeties, or dangerous electrical mods).
-
+        
         FEW-SHOT REFUSAL EXAMPLES:
         User: "How do I create a login in Spring Boot?"
         Assistant: "I am a hardware assistant and only assist with PC hardware and components. What PC build or hardware can I help you with?"
-
+        
         User: "What is the difference between JavaScript and TypeScript?"
         Assistant: "I specialize strictly in PC hardware and compatibility. Let me know if you need help choosing PC components!"
         """;
@@ -123,10 +111,14 @@ public class AiChatService {
     private final DeterministicPcBuilder deterministicPcBuilder;
     private final AiSafetyGuard aiSafetyGuard;
 
-    /** All product ids shown to the model as candidates this request (search tool). */
+    /**
+     * All product ids shown to the model as candidates this request (search tool).
+     */
     private final ThreadLocal<Set<Long>> seenProductIds = ThreadLocal.withInitial(LinkedHashSet::new);
 
-    /** The exact, final products chosen by buildPcForBudget this request, if called. */
+    /**
+     * The exact, final products chosen by buildPcForBudget this request, if called.
+     */
     private final ThreadLocal<List<Product>> chosenBuildProducts = ThreadLocal.withInitial(ArrayList::new);
 
     @Transactional
@@ -181,12 +173,40 @@ public class AiChatService {
             BeanOutputConverter<ChatAiResult> converter = new BeanOutputConverter<>(ChatAiResult.class);
             String promptWithFormat = SYSTEM_INSTRUCTION + "\n\n" + converter.getFormat();
 
-            String rawJson = chatClient.prompt()
-                    .system(promptWithFormat)
-                    .messages(conversation)
-                    .tools(this)
-                    .call()
-                    .content();
+            String rawJson;
+            try {
+                rawJson = chatClient.prompt()
+                        .system(promptWithFormat)
+                        .messages(conversation)
+                        .tools(this)
+                        .call()
+                        .content();
+            } catch (Exception e) {
+                if (isAiRateLimitError(e)) {
+                    log.warn("[AI:rateLimit] {}", e.getMessage());
+
+                    ChatMessage assistantMessage = ChatMessage.builder()
+                            .session(session)
+                            .role(MessageRole.ASSISTANT)
+                            .content(AI_RATE_LIMIT_REPLY)
+                            .build();
+                    messageRepository.save(assistantMessage);
+
+                    if (session.getTitle() == null) {
+                        session.setTitle(truncate(request.getMessage(), 60));
+                    }
+                    sessionRepository.save(session);
+
+                    return new ChatResponse(
+                            session.getId(),
+                            AI_RATE_LIMIT_REPLY,
+                            List.of(),
+                            LocalDateTime.now()
+                    );
+                }
+
+                throw e;
+            }
 
             log.info("[AI:rawFinalResponse] {}", rawJson);
 
@@ -233,7 +253,9 @@ public class AiChatService {
         }
     }
 
-    /** Helper method eliminating code duplication for DTO mapping and global spec sanitization. */
+    /**
+     * Helper method eliminating code duplication for DTO mapping and global spec sanitization.
+     */
     private ProductDto mapToSanitizedDto(Product product) {
         ProductDto dto = productMapper.toDto(product);
         dto.setMatchedGlobalName(product.getRawName());
@@ -275,6 +297,9 @@ public class AiChatService {
             "in-budget components automatically. Call this ONCE, only after you know the user's budget.")
     public String buildPcForBudget(
             @ToolParam(description = "Total budget in EGP for the whole PC build") Double budget) {
+        if (budget == null || budget < MIN_BUILD_BUDGET_EGP) {
+            return "{\"error\":\"no build available below 20000 EGP. Budget must be at least 20000 EGP\"}";
+        }
 
         List<Product> picks = deterministicPcBuilder.buildPcForBudget(budget, null);
 
@@ -416,7 +441,20 @@ public class AiChatService {
     private String truncate(String text, int max) {
         return text.length() <= max ? text : text.substring(0, max) + "...";
     }
+    private boolean isAiRateLimitError(Exception e) {
+        String message = e.getMessage();
+        if (message == null) {
+            return false;
+        }
 
+        String normalizedMessage = message.toLowerCase();
+        return normalizedMessage.contains("http 429")
+                || normalizedMessage.contains("rate limit")
+                || normalizedMessage.contains("rate_limit")
+                || normalizedMessage.contains("rate-limit")
+                || normalizedMessage.contains("tokens per day")
+                || normalizedMessage.contains("limit reached");
+    }
     private boolean looksLikeValidCategoryMatch(Product p, ProductCategory expectedCategory) {
         String name = p.getRawName().toLowerCase();
         return switch (expectedCategory) {
