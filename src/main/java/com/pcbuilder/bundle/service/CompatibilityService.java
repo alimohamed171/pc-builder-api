@@ -17,9 +17,9 @@ import java.util.stream.Collectors;
 
 /**
  * Runs component-compatibility checks over a set of chosen products
- * (CPU <-> Motherboard socket, Motherboard <-> Case form factor, PSU wattage
- * vs estimated draw, Cooler radiator size vs Case size) and, whenever a
- * check fails, looks up compatible alternatives from the catalog.
+ * (CPU <-> Motherboard socket, Motherboard <-> Memory RAM type, Cooler <-> CPU socket,
+ * Motherboard <-> Case form factor, PSU wattage vs estimated draw, Cooler radiator size vs Case size)
+ * and, whenever a check fails, looks up compatible alternatives from the catalog.
  */
 @Service
 @RequiredArgsConstructor
@@ -52,12 +52,15 @@ public class CompatibilityService {
 
         Product cpu = firstOrNull(byCategory.get(ProductCategory.CPU));
         Product motherboard = firstOrNull(byCategory.get(ProductCategory.MOTHERBOARD));
+        Product memory = firstOrNull(byCategory.get(ProductCategory.MEMORY));
         Product gpu = firstOrNull(byCategory.get(ProductCategory.GPU));
         Product psu = firstOrNull(byCategory.get(ProductCategory.PSU));
         Product pcCase = firstOrNull(byCategory.get(ProductCategory.CASE));
         Product cooler = firstOrNull(byCategory.get(ProductCategory.COOLER));
 
         checkCpuMotherboardSocket(cpu, motherboard, result);
+        checkMotherboardMemoryRamType(motherboard, memory, cpu, result);
+        checkCoolerCpuSocket(cooler, cpu, result);
         checkMotherboardCaseFormFactor(motherboard, pcCase, result);
         checkPsuWattage(cpu, gpu, psu, result);
         checkCoolerCaseFit(cooler, pcCase, result);
@@ -70,14 +73,14 @@ public class CompatibilityService {
     // ---------------------------------------------------------------
     private void checkCpuMotherboardSocket(Product cpu, Product motherboard, CompatibilityResult result) {
         if (cpu == null || motherboard == null) {
-            return; // nothing to compare yet
+            return;
         }
 
-        String cpuSocket = normalize(SpecsUtil.get(SpecsUtil.parse(cpu.getSpecs()), "socket"));
-        String moboSocket = normalize(SpecsUtil.get(SpecsUtil.parse(motherboard.getSpecs()), "socket"));
+        String cpuSocket = SpecsUtil.extractSocket(cpu);
+        String moboSocket = SpecsUtil.extractSocket(motherboard);
 
         if (cpuSocket == null || moboSocket == null) {
-            return; // insufficient data, skip rather than false-flag
+            return;
         }
 
         if (!cpuSocket.equals(moboSocket)) {
@@ -95,15 +98,74 @@ public class CompatibilityService {
     }
 
     // ---------------------------------------------------------------
-    // Rule 2: Motherboard form factor must physically fit inside the Case
+    // Rule 2: RAM Type matching (Motherboard <-> RAM & CPU <-> RAM)
+    // ---------------------------------------------------------------
+    private void checkMotherboardMemoryRamType(Product motherboard, Product memory, Product cpu, CompatibilityResult result) {
+        if (memory == null) {
+            return;
+        }
+
+        String memRamType = SpecsUtil.extractRamType(memory);
+        if (memRamType == null) {
+            return;
+        }
+
+        if (motherboard != null) {
+            String moboRamType = SpecsUtil.extractRamType(motherboard);
+            if (moboRamType != null && !moboRamType.equals(memRamType)) {
+                result.addIssue("MEMORY",
+                        "Motherboard requires " + moboRamType + " memory, but selected RAM is " + memRamType + ".");
+
+                List<ProductDto> memAlternatives = findAlternativesByRamType(ProductCategory.MEMORY, moboRamType, memory.getId());
+                result.addAlternatives("MEMORY", memAlternatives);
+                return;
+            }
+        }
+
+        if (cpu != null) {
+            String cpuRamType = SpecsUtil.extractRamType(cpu);
+            if (cpuRamType != null && !cpuRamType.equals(memRamType)) {
+                result.addIssue("MEMORY",
+                        "CPU requires " + cpuRamType + " memory, but selected RAM is " + memRamType + ".");
+
+                List<ProductDto> memAlternatives = findAlternativesByRamType(ProductCategory.MEMORY, cpuRamType, memory.getId());
+                result.addAlternatives("MEMORY", memAlternatives);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Rule 3: Cooler CPU Socket support
+    // ---------------------------------------------------------------
+    private void checkCoolerCpuSocket(Product cooler, Product cpu, CompatibilityResult result) {
+        if (cooler == null || cpu == null) {
+            return;
+        }
+
+        String cpuSocket = SpecsUtil.extractSocket(cpu);
+        if (cpuSocket == null) {
+            return;
+        }
+
+        if (!SpecsUtil.coolerSupportsSocket(cooler, cpuSocket)) {
+            result.addIssue("COOLER",
+                    "Cooler does not support CPU socket (" + cpuSocket + ").");
+
+            List<ProductDto> coolerAlternatives = findAlternativesByCoolerSocket(cpuSocket, cooler.getId());
+            result.addAlternatives("COOLER", coolerAlternatives);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Rule 4: Motherboard form factor must physically fit inside the Case
     // ---------------------------------------------------------------
     private void checkMotherboardCaseFormFactor(Product motherboard, Product pcCase, CompatibilityResult result) {
         if (motherboard == null || pcCase == null) {
             return;
         }
 
-        String moboFormFactor = normalize(SpecsUtil.get(SpecsUtil.parse(motherboard.getSpecs()), "form_factor"));
-        String caseType = normalize(SpecsUtil.get(SpecsUtil.parse(pcCase.getSpecs()), "type"));
+        String moboFormFactor = SpecsUtil.extractFormFactor(motherboard);
+        String caseType = SpecsUtil.extractFormFactor(pcCase);
 
         Integer moboRank = rankOf(moboFormFactor);
         Integer caseRank = rankOf(caseType);
@@ -122,14 +184,14 @@ public class CompatibilityService {
     }
 
     // ---------------------------------------------------------------
-    // Rule 3: PSU wattage must cover estimated CPU + GPU draw + headroom
+    // Rule 5: PSU wattage must cover estimated CPU + GPU draw + headroom
     // ---------------------------------------------------------------
     private void checkPsuWattage(Product cpu, Product gpu, Product psu, CompatibilityResult result) {
         if (psu == null || (cpu == null && gpu == null)) {
             return;
         }
 
-        Double psuWattage = SpecsUtil.getDouble(SpecsUtil.parse(psu.getSpecs()), "wattage");
+        Double psuWattage = SpecsUtil.extractWattage(psu);
         if (psuWattage == null) {
             return;
         }
@@ -154,7 +216,7 @@ public class CompatibilityService {
     }
 
     // ---------------------------------------------------------------
-    // Rule 4 (soft check): large AIO/radiator coolers may not fit compact cases
+    // Rule 6 (soft check): large AIO/radiator coolers may not fit compact cases
     // ---------------------------------------------------------------
     private void checkCoolerCaseFit(Product cooler, Product pcCase, CompatibilityResult result) {
         if (cooler == null || pcCase == null) {
@@ -162,7 +224,7 @@ public class CompatibilityService {
         }
 
         Double coolerSizeMm = SpecsUtil.getDouble(SpecsUtil.parse(cooler.getSpecs()), "size_mm");
-        String caseType = normalize(SpecsUtil.get(SpecsUtil.parse(pcCase.getSpecs()), "type"));
+        String caseType = SpecsUtil.extractFormFactor(pcCase);
 
         if (coolerSizeMm == null || caseType == null) {
             return;
@@ -194,7 +256,29 @@ public class CompatibilityService {
     private List<ProductDto> findAlternativesBySocket(ProductCategory category, String socket, Long excludeId) {
         return productRepository.findByCategory(category).stream()
                 .filter(p -> !p.getId().equals(excludeId))
-                .filter(p -> socket.equals(normalize(SpecsUtil.get(SpecsUtil.parse(p.getSpecs()), "socket"))))
+                .filter(p -> socket.equals(SpecsUtil.extractSocket(p)))
+                .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                .sorted(Comparator.comparing(Product::getPriceEgp))
+                .limit(ALTERNATIVES_LIMIT)
+                .map(productMapper::toDto)
+                .collect(Collectors.toList());
+    }
+
+    private List<ProductDto> findAlternativesByRamType(ProductCategory category, String ramType, Long excludeId) {
+        return productRepository.findByCategory(category).stream()
+                .filter(p -> !p.getId().equals(excludeId))
+                .filter(p -> ramType.equals(SpecsUtil.extractRamType(p)))
+                .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                .sorted(Comparator.comparing(Product::getPriceEgp))
+                .limit(ALTERNATIVES_LIMIT)
+                .map(productMapper::toDto)
+                .collect(Collectors.toList());
+    }
+
+    private List<ProductDto> findAlternativesByCoolerSocket(String socket, Long excludeId) {
+        return productRepository.findByCategory(ProductCategory.COOLER).stream()
+                .filter(p -> !p.getId().equals(excludeId))
+                .filter(p -> SpecsUtil.coolerSupportsSocket(p, socket))
                 .filter(p -> Boolean.TRUE.equals(p.getInStock()))
                 .sorted(Comparator.comparing(Product::getPriceEgp))
                 .limit(ALTERNATIVES_LIMIT)
@@ -206,7 +290,7 @@ public class CompatibilityService {
         return productRepository.findByCategory(category).stream()
                 .filter(p -> !p.getId().equals(excludeId))
                 .filter(p -> {
-                    String type = normalize(SpecsUtil.get(SpecsUtil.parse(p.getSpecs()), "type"));
+                    String type = SpecsUtil.extractFormFactor(p);
                     Integer rank = rankOf(type);
                     return rank != null && rank >= minRank;
                 })
@@ -221,7 +305,7 @@ public class CompatibilityService {
         return productRepository.findByCategory(ProductCategory.PSU).stream()
                 .filter(p -> !p.getId().equals(excludeId))
                 .filter(p -> {
-                    Double wattage = SpecsUtil.getDouble(SpecsUtil.parse(p.getSpecs()), "wattage");
+                    Double wattage = SpecsUtil.extractWattage(p);
                     return wattage != null && wattage >= minWattage;
                 })
                 .filter(p -> Boolean.TRUE.equals(p.getInStock()))
@@ -238,18 +322,10 @@ public class CompatibilityService {
         return (products == null || products.isEmpty()) ? null : products.get(0);
     }
 
-    private String normalize(String value) {
-        if (value == null) {
-            return null;
-        }
-        return value.trim().toUpperCase();
-    }
-
     private Integer rankOf(String formFactorOrCaseType) {
         if (formFactorOrCaseType == null) {
             return null;
         }
-        // match the longest known keyword contained in the (possibly verbose) case/mobo type string
         if (formFactorOrCaseType.contains("EATX") || formFactorOrCaseType.contains("FULL TOWER")) {
             return FORM_FACTOR_RANK.get("EATX");
         }

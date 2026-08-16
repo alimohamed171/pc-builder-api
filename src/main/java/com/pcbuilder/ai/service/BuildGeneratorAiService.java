@@ -1,5 +1,6 @@
 package com.pcbuilder.ai.service;
 
+import com.pcbuilder.ai.dto.PcBudgetStrategy;
 import com.pcbuilder.ai.dto.request.BuildGeneratorRequest;
 import com.pcbuilder.ai.dto.response.BuildGeneratorResponse;
 import com.pcbuilder.ai.exception.AiServiceException;
@@ -14,6 +15,7 @@ import com.pcbuilder.product.mapper.ProductMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -47,24 +49,215 @@ public class BuildGeneratorAiService {
     private final ProductCatalogCache productCatalogCache;
     private final ChatClient chatClient;
     private final ProductMapper productMapper;
+    private PcBudgetStrategy generateBudgetStrategy(
+            BuildGeneratorRequest request
+    ) {
 
+        double budget =
+                request.getBudget() != null
+                        ? request.getBudget().doubleValue()
+                        : 30000.0;
+
+        String usage =
+                request.getUsage() != null
+                        && !request.getUsage().isBlank()
+                        ? request.getUsage()
+                        : request.getPrompt();
+
+        BeanOutputConverter<PcBudgetStrategy> converter =
+                new BeanOutputConverter<>(PcBudgetStrategy.class);
+
+        String systemPrompt = """
+        You are an expert PC hardware architect specializing in the Egyptian hardware market.
+
+        Your job is ONLY to create a strategic budget allocation (percentages).
+        Do NOT select specific products.
+
+        The available categories are:
+        CPU, MOTHERBOARD, MEMORY, GPU, PSU, CASE, COOLER
+
+        CRITICAL MARKET REALITIES (EGYPTIAN POUND - EGP):
+        - A modern entry-level dedicated GPU (like an RTX 3050) costs AT LEAST 13,000 EGP.
+        WORKLOAD PROFILES:
+        1. Office / General / Study:
+           - Focus heavily on CPU (30-40%), RAM, and a fast NVMe (handled by Motherboard).
+        2. Programming / Software Development:
+           - CPU and RAM are top priorities.
+        3. Gaming:
+           - GPU is the highest priority (35% - 45%).
+           - Do not overspend on the CPU; prioritize the graphics card.
+        4. AI Workstation / 3D Rendering:
+           - GPU is mandatory (40% - 50%) for VRAM/CUDA cores.
+           - PSU MUST be at least 0.08 - 0.10 to safely power high-end GPUs.
+           - COOLER MUST be at least 0.04 - 0.06 to prevent thermal throttling.
+
+        STRICT RULES:
+        1. Allocation values must be decimals between 0.0 and 1.0.
+        2. Allocation values must add up to exactly 1.0 (100%).
+        3. Do NOT evenly distribute the budget. PCs are heavily skewed toward the CPU and GPU.
+        4. The final selection will be performed by deterministic Java code. You are only the financial planner.
+        
+        Return ONLY the requested structured JSON output. No markdown, no conversational text.
+
+        """ + converter.getFormat();
+
+        String userPrompt = """
+            User usage: %s
+
+            User budget: %.2f EGP
+
+            Preferred brand: %s
+
+            User request:
+            %s
+            """.formatted(
+                usage,
+                budget,
+                request.getPreferredBrand(),
+                request.getPrompt()
+        );
+
+        try {
+
+            String response =
+                    chatClient.prompt()
+                            .system(systemPrompt)
+                            .user(userPrompt)
+                            .call()
+                            .content();
+
+            if (response == null || response.isBlank()) {
+                throw new IllegalStateException(
+                        "AI returned empty allocation strategy"
+                );
+            }
+
+            PcBudgetStrategy strategy =
+                    converter.convert(response);
+
+            validateStrategy(strategy);
+
+            return strategy;
+
+        } catch (Exception e) {
+
+            log.error(
+                    "Failed to generate AI budget strategy",
+                    e
+            );
+
+            return fallbackStrategy(usage);
+        }
+    }
+    private void validateStrategy(
+            PcBudgetStrategy strategy
+    ) {
+
+        if (strategy == null
+                || strategy.allocation() == null
+                || strategy.allocation().isEmpty()) {
+
+            throw new IllegalArgumentException(
+                    "AI returned an empty allocation"
+            );
+        }
+
+        double total =
+                strategy.allocation()
+                        .values()
+                        .stream()
+                        .mapToDouble(Double::doubleValue)
+                        .sum();
+
+        if (Math.abs(total - 1.0) > 0.02) {
+
+            throw new IllegalArgumentException(
+                    "AI allocation must total approximately 100%, got "
+                            + total
+            );
+        }
+
+        for (Map.Entry<ProductCategory, Double> entry
+                : strategy.allocation().entrySet()) {
+
+            if (entry.getValue() == null
+                    || entry.getValue() < 0
+                    || entry.getValue() > 1) {
+
+                throw new IllegalArgumentException(
+                        "Invalid allocation for "
+                                + entry.getKey()
+                );
+            }
+        }
+    }
+    private PcBudgetStrategy fallbackStrategy(
+            String usage
+    ) {
+
+        Map<ProductCategory, Double> allocation =
+                new LinkedHashMap<>();
+
+        allocation.put(ProductCategory.CPU, 0.20);
+        allocation.put(ProductCategory.MOTHERBOARD, 0.12);
+        allocation.put(ProductCategory.MEMORY, 0.20);
+        allocation.put(ProductCategory.GPU, 0.20);
+        allocation.put(ProductCategory.PSU, 0.10);
+        allocation.put(ProductCategory.CASE, 0.08);
+        allocation.put(ProductCategory.COOLER, 0.10);
+
+        boolean gpuRequired =
+                usage != null
+                        && (
+                        usage.toLowerCase().contains("gaming")
+                                || usage.toLowerCase().contains("ai")
+                                || usage.toLowerCase().contains("workstation")
+                );
+
+        return new PcBudgetStrategy(
+                allocation,
+                16,
+                32,
+                "Fallback allocation used because AI strategy generation failed."
+        );
+    }
     public BuildGeneratorResponse generate(BuildGeneratorRequest request) {
 
         String effectiveUsage = (request.getUsage() != null && !request.getUsage().isBlank())
                 ? request.getUsage()
                 : request.getPrompt();
 
-        List<Product> pickedProducts = deterministicPcBuilder.buildPcForBudget(
-                request.getBudget() != null ? request.getBudget().doubleValue() : 30000.0,
-                request.getPreferredBrand(),
-                effectiveUsage
+//        List<Product> pickedProducts = deterministicPcBuilder.buildPcForBudget(
+//                request.getBudget() != null ? request.getBudget().doubleValue() : 30000.0,
+//                request.getPreferredBrand(),
+//                effectiveUsage
+//        );
+        PcBudgetStrategy strategy =
+                generateBudgetStrategy(request);
+
+        log.info(
+                "AI budget strategy for usage={} budget={}: {}",
+                effectiveUsage,
+                request.getBudget(),
+                strategy
         );
 
+        List<Product> pickedProducts =
+                deterministicPcBuilder.buildPcForBudget(
+                        request.getBudget() != null
+                                ? request.getBudget().doubleValue()
+                                : 30000.0,
+                        request.getPreferredBrand(),
+                        effectiveUsage,
+                        strategy
+                );
         if (pickedProducts.isEmpty()) {
             throw new AiServiceException("Could not generate a valid build for the given budget.");
         }
 
         CompatibilityResult compatibilityResult = compatibilityService.evaluate(pickedProducts);
+
+        double budgetLimit = request.getBudget() != null ? request.getBudget().doubleValue() : 30000.0;
 
         int attempts = 0;
         while (!compatibilityResult.isCompatible() && attempts < MAX_REPAIR_ATTEMPTS) {
@@ -74,7 +267,7 @@ public class BuildGeneratorAiService {
                             .map(i -> i.getCategory() + ": " + i.getReason())
                             .collect(Collectors.joining(", ")));
 
-            boolean repaired = repairOneIssue(pickedProducts, compatibilityResult, request.getPreferredBrand());
+            boolean repaired = repairOneIssue(pickedProducts, compatibilityResult, request.getPreferredBrand(), budgetLimit);
             if (!repaired) {
                 log.error("Could not repair remaining compatibility issues after {} attempts", attempts);
                 break;
@@ -94,7 +287,6 @@ public class BuildGeneratorAiService {
                 .map(Product::getPriceEgp)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        double budgetLimit = request.getBudget() != null ? request.getBudget().doubleValue() : 30000.0;
         if (totalPrice.doubleValue() > budgetLimit) {
             throw new AiServiceException(String.format(
                     "Could not generate a valid build within your budget of %,.0f EGP. The minimum required budget for available in-stock parts is %,.0f EGP.",
@@ -143,17 +335,27 @@ public class BuildGeneratorAiService {
      * true if a swap was made (caller should re-evaluate), false if nothing
      * could be done.
      */
-    private boolean repairOneIssue(List<Product> pickedProducts, CompatibilityResult result, String preferredBrand) {
+    private boolean repairOneIssue(List<Product> pickedProducts, CompatibilityResult result, String preferredBrand, double budgetLimit) {
         if (result.getIssues() == null || result.getIssues().isEmpty()) {
             return false;
         }
 
         CompatibilityIssueDto issue = result.getIssues().get(0);
-        ProductCategory categoryToSwap = resolveCategoryFromIssue(issue, pickedProducts);
-        if (categoryToSwap == null) {
-            return false;
+        ProductCategory primaryCategory = resolveCategoryFromIssue(issue, pickedProducts);
+
+        if (primaryCategory != null && trySwapCategory(primaryCategory, pickedProducts, result, preferredBrand, budgetLimit)) {
+            return true;
         }
 
+        ProductCategory secondaryCategory = resolveSecondaryCategoryFromIssue(issue, pickedProducts);
+        if (secondaryCategory != null && secondaryCategory != primaryCategory) {
+            return trySwapCategory(secondaryCategory, pickedProducts, result, preferredBrand, budgetLimit);
+        }
+
+        return false;
+    }
+
+    private boolean trySwapCategory(ProductCategory categoryToSwap, List<Product> pickedProducts, CompatibilityResult result, String preferredBrand, double budgetLimit) {
         Product current = pickedProducts.stream()
                 .filter(p -> p.getCategory() == categoryToSwap)
                 .findFirst()
@@ -162,11 +364,18 @@ public class BuildGeneratorAiService {
             return false;
         }
 
+        BigDecimal otherProductsTotal = pickedProducts.stream()
+                .filter(p -> p.getCategory() != categoryToSwap)
+                .map(Product::getPriceEgp)
+                .filter(Objects::nonNull)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
         List<Product> fullPool = productCatalogCache.getByCategory(categoryToSwap).stream()
                 .filter(p -> Boolean.TRUE.equals(p.getInStock()))
+                .filter(p -> p.getPriceEgp() != null)
                 .filter(p -> !p.getId().equals(current.getId()))
-                .sorted(Comparator.comparing(Product::getPriceEgp))
-                .collect(Collectors.toList());
+                .sorted(Comparator.comparing(Product::getPriceEgp).reversed())
+                .toList();
 
         List<Product> alternatives = new ArrayList<>();
         if (preferredBrand != null && !preferredBrand.isBlank()) {
@@ -183,22 +392,42 @@ public class BuildGeneratorAiService {
             }
         }
 
+        Product bestFullyCompatibleCandidate = null;
+        Product bestPartialCandidate = null;
+        int minIssues = result.getIssues().size();
+
         for (Product candidate : alternatives) {
+            BigDecimal candidatePrice = candidate.getPriceEgp();
+            if (otherProductsTotal.add(candidatePrice).doubleValue() > budgetLimit) {
+                continue;
+            }
+
             List<Product> trialBuild = pickedProducts.stream()
                     .map(p -> p.getCategory() == categoryToSwap ? candidate : p)
                     .collect(Collectors.toList());
-
             CompatibilityResult trialResult = compatibilityService.evaluate(trialBuild);
-            if (trialResult.isCompatible() || trialResult.getIssues().size() < result.getIssues().size()) {
-                // Found a strictly better (or fully fixed) combination - apply it.
-                pickedProducts.replaceAll(p -> p.getCategory() == categoryToSwap ? candidate : p);
-                log.info("Repaired build by swapping category={} to productId={}",
-                        categoryToSwap, candidate.getId());
-                return true;
+
+            if (trialResult.isCompatible()) {
+                bestFullyCompatibleCandidate = candidate;
+                break;
+            } else if (trialResult.getIssues().size() < minIssues && bestPartialCandidate == null) {
+                bestPartialCandidate = candidate;
+                minIssues = trialResult.getIssues().size();
             }
         }
 
-        log.warn("No alternative found in category={} that improves compatibility", categoryToSwap);
+        Product chosenCandidate = bestFullyCompatibleCandidate != null ? bestFullyCompatibleCandidate : bestPartialCandidate;
+
+        if (chosenCandidate != null) {
+            final Product toSwap = chosenCandidate;
+            pickedProducts.replaceAll(p -> p.getCategory() == categoryToSwap ? toSwap : p);
+            log.info("Repaired build by swapping category={} to productId={} (price={})",
+                    categoryToSwap, toSwap.getId(), toSwap.getPriceEgp());
+            return true;
+        }
+
+        log.warn("No alternative found in category={} that improves compatibility within budget limit {}",
+                categoryToSwap, budgetLimit);
         return false;
     }
 
@@ -222,6 +451,25 @@ public class BuildGeneratorAiService {
                 }
                 return pc;
             }
+        }
+        return null;
+    }
+
+    private ProductCategory resolveSecondaryCategoryFromIssue(CompatibilityIssueDto issue, List<Product> pickedProducts) {
+        String category = issue.getCategory();
+        if (category == null) return null;
+        String catUpper = category.toUpperCase();
+
+        if (catUpper.contains("MOTHERBOARD")) {
+            return ProductCategory.CPU;
+        } else if (catUpper.contains("MEMORY")) {
+            return ProductCategory.MOTHERBOARD;
+        } else if (catUpper.contains("COOLER")) {
+            return ProductCategory.CASE;
+        } else if (catUpper.contains("CASE")) {
+            return ProductCategory.MOTHERBOARD;
+        } else if (catUpper.contains("PSU")) {
+            return ProductCategory.GPU;
         }
         return null;
     }

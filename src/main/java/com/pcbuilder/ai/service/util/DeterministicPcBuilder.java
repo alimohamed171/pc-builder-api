@@ -1,6 +1,8 @@
 package com.pcbuilder.ai.service.util;
 
+import com.pcbuilder.ai.dto.PcBudgetStrategy;
 import com.pcbuilder.ai.service.ProductCatalogCache;
+import com.pcbuilder.common.SpecsUtil;
 import com.pcbuilder.product.entity.Product;
 import com.pcbuilder.product.entity.ProductCategory;
 import lombok.RequiredArgsConstructor;
@@ -15,28 +17,57 @@ import java.util.stream.Collectors;
 @Slf4j
 public class DeterministicPcBuilder {
 
+    private static final List<ProductCategory> CANONICAL_CATEGORY_ORDER = List.of(
+            ProductCategory.CPU,
+            ProductCategory.MOTHERBOARD,
+            ProductCategory.MEMORY,
+            ProductCategory.COOLER,
+            ProductCategory.GPU,
+            ProductCategory.CASE,
+            ProductCategory.PSU
+    );
+
     private final ProductCatalogCache productCatalogCache;
 
     public List<Product> buildPcForBudget(Double budget, String preferredBrand) {
-        return buildPcForBudget(budget, preferredBrand, null);
+        return buildPcForBudget(budget, preferredBrand, null, null);
     }
 
-    public List<Product> buildPcForBudget(Double budget, String preferredBrand, String usage) {
+    public List<Product> buildPcForBudget(
+            Double budget,
+            String preferredBrand,
+            String usage,
+            PcBudgetStrategy strategy
+    ){
         if (budget == null || budget <= 0) {
             return List.of();
         }
 
-        Map<ProductCategory, Double> allocation = getAllocationForUsage(usage);
-
+        Map<ProductCategory, Double> allocation =
+                strategy != null && strategy.allocation() != null
+                        ? strategy.allocation()
+                        : getDefaultAllocation();
         List<Product> picks = new ArrayList<>();
         double rolloverMoney = 0.0;
 
         String requiredSocket = null;
         String requiredRamType = null;
 
-        for (Map.Entry<ProductCategory, Double> entry : allocation.entrySet()) {
-            ProductCategory cat = entry.getKey();
-            double subBudget = (budget * entry.getValue()) + rolloverMoney;
+        List<ProductCategory> orderedCategories = new ArrayList<>();
+        for (ProductCategory cat : CANONICAL_CATEGORY_ORDER) {
+            if (allocation.containsKey(cat)) {
+                orderedCategories.add(cat);
+            }
+        }
+        for (ProductCategory cat : allocation.keySet()) {
+            if (!orderedCategories.contains(cat)) {
+                orderedCategories.add(cat);
+            }
+        }
+
+        for (ProductCategory cat : orderedCategories) {
+            Double allocWeight = allocation.getOrDefault(cat, 0.0);
+            double subBudget = (budget * allocWeight) + rolloverMoney;
 
             List<Product> baseCandidates = productCatalogCache.getByCategory(cat).stream()
                     .filter(p -> Boolean.TRUE.equals(p.getInStock()))
@@ -71,6 +102,14 @@ public class DeterministicPcBuilder {
                         log.error("No motherboard found anywhere in catalog matching socket={} - " +
                                 "build will be incompatible for this category", requiredSocket);
                     }
+                }
+            }
+
+            // --- Socket-matching for CPU: in case CPU is evaluated after MOTHERBOARD ---
+            if (cat == ProductCategory.CPU && requiredSocket != null) {
+                List<Product> socketMatching = filterBySocket(candidates, requiredSocket);
+                if (!socketMatching.isEmpty()) {
+                    candidates = socketMatching;
                 }
             }
 
@@ -169,15 +208,14 @@ public class DeterministicPcBuilder {
 
             if (cat == ProductCategory.CPU) {
                 requiredSocket = extractSocket(chosen);
-            } else if (cat == ProductCategory.MOTHERBOARD) {
                 requiredRamType = extractRamType(chosen);
-
-                if (requiredRamType == null && requiredSocket != null) {
-                    if (requiredSocket.equals("AM5") || requiredSocket.equals("LGA1851")) {
-                        requiredRamType = "DDR5";
-                    } else if (requiredSocket.equals("AM4")) {
-                        requiredRamType = "DDR4";
-                    }
+            } else if (cat == ProductCategory.MOTHERBOARD) {
+                String moboRam = extractRamType(chosen);
+                if (moboRam != null) {
+                    requiredRamType = moboRam;
+                }
+                if (requiredSocket == null) {
+                    requiredSocket = extractSocket(chosen);
                 }
             }
 
@@ -290,33 +328,16 @@ public class DeterministicPcBuilder {
                 .collect(Collectors.toList());
     }
 
-    private String extractSocket(Product p) {
-        String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
-        if (text.contains("AM4")) return "AM4";
-        if (text.contains("AM5")) return "AM5";
-        if (text.contains("LGA1700") || text.contains("LGA 1700")) return "LGA1700";
-        if (text.contains("LGA1200") || text.contains("LGA 1200")) return "LGA1200";
-        if (text.contains("LGA1851") || text.contains("LGA 1851")) return "LGA1851";
-        return null;
+    public static String extractSocket(Product p) {
+        return SpecsUtil.extractSocket(p);
     }
 
-    private String extractRamType(Product p) {
-        String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
-        if (text.contains("DDR5")) return "DDR5";
-        if (text.contains("DDR4")) return "DDR4";
-        return null;
+    public static String extractRamType(Product p) {
+        return SpecsUtil.extractRamType(p);
     }
 
-    private boolean coolerSupportsSocket(Product p, String targetSocket) {
-        if (targetSocket == null) return true;
-        String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
-
-        String normalizedText = text.replace(" ", "");
-
-        if (targetSocket.equals("AM5")) {
-            return normalizedText.contains("AM5") || normalizedText.contains("AM4");
-        }
-        return normalizedText.contains(targetSocket);
+    public static boolean coolerSupportsSocket(Product p, String targetSocket) {
+        return SpecsUtil.coolerSupportsSocket(p, targetSocket);
     }
 
     private boolean isLargeCapacityOrDualChannel(Product p, String usage) {
@@ -331,7 +352,21 @@ public class DeterministicPcBuilder {
         }
         return isDualChannelKit(p);
     }
+    private Map<ProductCategory, Double> getDefaultAllocation() {
 
+        Map<ProductCategory, Double> allocation =
+                new LinkedHashMap<>();
+
+        allocation.put(ProductCategory.CPU, 0.20);
+        allocation.put(ProductCategory.MOTHERBOARD, 0.12);
+        allocation.put(ProductCategory.MEMORY, 0.20);
+        allocation.put(ProductCategory.GPU, 0.20);
+        allocation.put(ProductCategory.PSU, 0.10);
+        allocation.put(ProductCategory.CASE, 0.08);
+        allocation.put(ProductCategory.COOLER, 0.10);
+
+        return allocation;
+    }
     private Map<ProductCategory, Double> getAllocationForUsage(String usage) {
         Map<ProductCategory, Double> allocation = new LinkedHashMap<>();
 
