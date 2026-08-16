@@ -50,9 +50,14 @@ public class BuildGeneratorAiService {
 
     public BuildGeneratorResponse generate(BuildGeneratorRequest request) {
 
+        String effectiveUsage = (request.getUsage() != null && !request.getUsage().isBlank())
+                ? request.getUsage()
+                : request.getPrompt();
+
         List<Product> pickedProducts = deterministicPcBuilder.buildPcForBudget(
                 request.getBudget() != null ? request.getBudget().doubleValue() : 30000.0,
-                request.getPreferredBrand()
+                request.getPreferredBrand(),
+                effectiveUsage
         );
 
         if (pickedProducts.isEmpty()) {
@@ -89,6 +94,13 @@ public class BuildGeneratorAiService {
                 .map(Product::getPriceEgp)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        double budgetLimit = request.getBudget() != null ? request.getBudget().doubleValue() : 30000.0;
+        if (totalPrice.doubleValue() > budgetLimit) {
+            throw new AiServiceException(String.format(
+                    "Could not generate a valid build within your budget of %,.0f EGP. The minimum required budget for available in-stock parts is %,.0f EGP.",
+                    budgetLimit, totalPrice.doubleValue()));
+        }
+
         List<ProductDto> componentPicks = pickedProducts.stream()
                 .map(p -> {
                     ProductDto dto = productMapper.toDto(p);
@@ -101,12 +113,17 @@ public class BuildGeneratorAiService {
         String userPrompt = buildAiPrompt(request, componentPicks);
         String reasoning;
         try {
-            String responseContent = chatClient.prompt()
-                    .system(SYSTEM_INSTRUCTION)
-                    .user(userPrompt)
-                    .call()
-                    .content();
-            reasoning = responseContent != null ? responseContent.trim() : "";
+            if (chatClient != null) {
+                var promptSpec = chatClient.prompt();
+                String responseContent = promptSpec
+                        .system(SYSTEM_INSTRUCTION)
+                        .user(userPrompt)
+                        .call()
+                        .content();
+                reasoning = responseContent != null ? responseContent.trim() : "";
+            } else {
+                reasoning = "This build has been carefully optimized by our system to match your budget and usage requirements, ensuring maximum performance and compatibility.";
+            }
         } catch (Exception e) {
             log.error("AI API failed to generate reasoning. Using fallback text.", e);
             reasoning = "This build has been carefully optimized by our system to match your budget and usage requirements, ensuring maximum performance and compatibility.";
@@ -145,29 +162,25 @@ public class BuildGeneratorAiService {
             return false;
         }
 
-        // Try alternatives suggested directly by the compatibility engine first.
-        List<Product> alternatives = new ArrayList<>();
-        if (result.getAlternatives() != null && result.getAlternatives().containsKey(categoryToSwap.name())) {
-            // CompatibilityResult.alternatives holds ProductDto - map back via catalog by id if needed.
-            // Falling back to full catalog search is simpler and avoids a DTO->entity round trip.
-        }
-
         List<Product> fullPool = productCatalogCache.getByCategory(categoryToSwap).stream()
                 .filter(p -> Boolean.TRUE.equals(p.getInStock()))
                 .filter(p -> !p.getId().equals(current.getId()))
                 .sorted(Comparator.comparing(Product::getPriceEgp))
                 .collect(Collectors.toList());
 
+        List<Product> alternatives = new ArrayList<>();
         if (preferredBrand != null && !preferredBrand.isBlank()) {
             List<Product> brandFiltered = fullPool.stream()
-                    .filter(p -> p.getRawName().toLowerCase().contains(preferredBrand.toLowerCase()))
-                    .collect(Collectors.toList());
+                    .filter(p -> DeterministicPcBuilder.matchesBrand(p, preferredBrand))
+                    .toList();
             if (!brandFiltered.isEmpty()) {
-                alternatives = brandFiltered;
+                alternatives.addAll(brandFiltered);
             }
         }
-        if (alternatives.isEmpty()) {
-            alternatives = fullPool;
+        for (Product p : fullPool) {
+            if (!alternatives.contains(p)) {
+                alternatives.add(p);
+            }
         }
 
         for (Product candidate : alternatives) {
