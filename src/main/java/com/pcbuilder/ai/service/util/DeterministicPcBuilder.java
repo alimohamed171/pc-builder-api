@@ -499,12 +499,43 @@ public class DeterministicPcBuilder {
     }
 
     public String extractRamType(Product p) {
-        String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
-        if (text.contains("DDR5")) return "DDR5";
-        if (text.contains("DDR4")) return "DDR4";
+        if (p.getSpecs() != null) {
+            String specs = p.getSpecs().toUpperCase();
+            if (specs.contains("DDR5")) return "DDR5";
+            if (specs.contains("DDR4")) return "DDR4";
+            if (specs.contains("DDR3")) return "DDR3";
+        }
+
+        String url = p.getSourceUrl() != null ? p.getSourceUrl() : "";
+        String name = p.getRawName() != null ? p.getRawName() : "";
+
+        String rawText = (url + " " + name).toUpperCase();
+
+        String text = rawText.replace(" ", "").replace("-", "");
+
+        if (text.contains("DDR5") || text.contains("AM5") || text.contains("LGA1851")) return "DDR5";
+        if (text.contains("DDR4") || text.contains("AM4") || text.contains("LGA1200") || text.contains("LGA1151")) return "DDR4";
+        if (text.contains("DDR3") || text.contains("LGA1150")) return "DDR3";
+
+        if (rawText.contains(" D4") || rawText.contains("-D4")) {
+            return "DDR4";
+        }
+        if (text.contains("LGA1700")) {
+            return "DDR5";
+        }
+
+        if (text.contains("4800") || text.contains("5200") || text.contains("5600") ||
+                text.contains("6000") || text.contains("6400") || text.contains("6800") ||
+                text.contains("7200") || text.contains("7600") || text.contains("8000")) {
+            return "DDR5";
+        }
+
+        if (text.contains("2666") || text.contains("3000") || text.contains("3200") || text.contains("3600")) {
+            return "DDR4";
+        }
+
         return null;
     }
-
     private boolean coolerSupportsSocket(Product p, String targetSocket) {
         if (targetSocket == null) return true;
         String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
@@ -540,37 +571,37 @@ public class DeterministicPcBuilder {
         String u = usage.trim().toLowerCase();
 
         if (u.contains("ai") || u.contains("workstation")) {
-            allocation.put(ProductCategory.CPU,         0.15);
+            allocation.put(ProductCategory.CPU, 0.15);
             allocation.put(ProductCategory.MOTHERBOARD, 0.10);
-            allocation.put(ProductCategory.MEMORY,      0.12);
-            allocation.put(ProductCategory.GPU,         0.50);
-            allocation.put(ProductCategory.PSU,         0.08);
-            allocation.put(ProductCategory.CASE,        0.02);
-            allocation.put(ProductCategory.COOLER,      0.03);
+            allocation.put(ProductCategory.MEMORY, 0.12);
+            allocation.put(ProductCategory.GPU, 0.50);
+            allocation.put(ProductCategory.PSU, 0.08);
+            allocation.put(ProductCategory.CASE, 0.02);
+            allocation.put(ProductCategory.COOLER, 0.03);
         } else if (u.contains("program")) {
-            allocation.put(ProductCategory.CPU,         0.30);
+            allocation.put(ProductCategory.CPU, 0.30);
             allocation.put(ProductCategory.MOTHERBOARD, 0.13);
-            allocation.put(ProductCategory.MEMORY,      0.27);
-            allocation.put(ProductCategory.GPU,         0.05);
-            allocation.put(ProductCategory.PSU,         0.08);
-            allocation.put(ProductCategory.CASE,        0.07);
-            allocation.put(ProductCategory.COOLER,      0.10);
+            allocation.put(ProductCategory.MEMORY, 0.27);
+            allocation.put(ProductCategory.GPU, 0.05);
+            allocation.put(ProductCategory.PSU, 0.08);
+            allocation.put(ProductCategory.CASE, 0.07);
+            allocation.put(ProductCategory.COOLER, 0.10);
         } else if (u.contains("office") || u.contains("general") || u.contains("study")) {
-            allocation.put(ProductCategory.CPU,         0.25);
+            allocation.put(ProductCategory.CPU, 0.25);
             allocation.put(ProductCategory.MOTHERBOARD, 0.20);
-            allocation.put(ProductCategory.MEMORY,      0.20);
-            allocation.put(ProductCategory.GPU,         0.05);
-            allocation.put(ProductCategory.PSU,         0.10);
-            allocation.put(ProductCategory.CASE,        0.10);
-            allocation.put(ProductCategory.COOLER,      0.10);
+            allocation.put(ProductCategory.MEMORY, 0.20);
+            allocation.put(ProductCategory.GPU, 0.05);
+            allocation.put(ProductCategory.PSU, 0.10);
+            allocation.put(ProductCategory.CASE, 0.10);
+            allocation.put(ProductCategory.COOLER, 0.10);
         } else {
-            allocation.put(ProductCategory.CPU,         0.18);
+            allocation.put(ProductCategory.CPU, 0.18);
             allocation.put(ProductCategory.MOTHERBOARD, 0.10);
-            allocation.put(ProductCategory.MEMORY,      0.10);
-            allocation.put(ProductCategory.GPU,         0.48);
-            allocation.put(ProductCategory.PSU,         0.07);
-            allocation.put(ProductCategory.CASE,        0.04);
-            allocation.put(ProductCategory.COOLER,      0.03);
+            allocation.put(ProductCategory.MEMORY, 0.10);
+            allocation.put(ProductCategory.GPU, 0.48);
+            allocation.put(ProductCategory.PSU, 0.07);
+            allocation.put(ProductCategory.CASE, 0.04);
+            allocation.put(ProductCategory.COOLER, 0.03);
         }
 
         return allocation;

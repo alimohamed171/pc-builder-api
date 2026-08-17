@@ -50,12 +50,14 @@ public class BuildGeneratorAiService {
         2. Spends as close to each category's allocated budget as possible
         3. Is optimized for the stated usage
         4. Respects brand preference when possible
+        5. Make sure all parts are compatible with the selected components
         
         CRITICAL RULES:
         - Return ONLY a JSON object, no explanation, no markdown, no backticks
         - Every ID you pick MUST come exactly from the candidate lists provided
         - Never invent or guess an ID
         - If a category has no candidates, omit it
+        - picked components MUST be compatible with each other
         - Try to pick the most expensive option within each category budget slice
         - The JSON format must be exactly:
         {
@@ -333,7 +335,8 @@ public class BuildGeneratorAiService {
             for (Product p : entry.getValue()) {
                 sb.append("  id=").append(p.getId())
                         .append(" | ").append(p.getRawName())
-                        .append(" | ").append(p.getPriceEgp()).append(" EGP\n");
+                        .append(" | ").append(p.getPriceEgp()).append(" EGP")
+                        .append(" | ").append(p.getSpecs()).append("\n");
             }
         }
 
