@@ -15,19 +15,12 @@ import java.math.BigDecimal;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Runs component-compatibility checks over a set of chosen products
- * (CPU <-> Motherboard socket, Motherboard <-> Case form factor, PSU wattage
- * vs estimated draw, Cooler radiator size vs Case size) and, whenever a
- * check fails, looks up compatible alternatives from the catalog.
- */
 @Service
 @RequiredArgsConstructor
 public class CompatibilityService {
 
     private static final int ALTERNATIVES_LIMIT = 5;
 
-    // form-factor "size rank": bigger case/board sizes can host smaller ones.
     private static final Map<String, Integer> FORM_FACTOR_RANK = Map.of(
             "MINI ITX", 1,
             "MICRO ATX", 2,
@@ -66,29 +59,51 @@ public class CompatibilityService {
     }
 
     // ---------------------------------------------------------------
+    // ADDED: The strict bulletproof socket extractor
+    // ---------------------------------------------------------------
+    private String extractSocketFromProduct(Product p) {
+        if (p == null) return null;
+
+        // 1. Check the Name first (Most Reliable)
+        String name = p.getRawName() != null ? p.getRawName().toUpperCase() : "";
+        if (name.contains("LGA1700") || name.contains("LGA 1700")) return "LGA1700";
+        if (name.contains("LGA1200") || name.contains("LGA 1200")) return "LGA1200";
+        if (name.contains("LGA1851") || name.contains("LGA 1851")) return "LGA1851";
+        if (name.matches(".*\\bAM5\\b.*")) return "AM5";
+        if (name.matches(".*\\bAM4\\b.*")) return "AM4";
+
+        // 2. Fallback to checking Specs if the name doesn't specify
+        if (p.getSpecs() != null) {
+            String specs = p.getSpecs().toUpperCase().replace("\n", " ").replace("\r", " ");
+            if (specs.contains("LGA1700") || specs.contains("LGA 1700")) return "LGA1700";
+            if (specs.contains("LGA1200") || specs.contains("LGA 1200")) return "LGA1200";
+            if (specs.contains("LGA1851") || specs.contains("LGA 1851")) return "LGA1851";
+            if (specs.matches(".*\\bAM5\\b.*")) return "AM5";
+            if (specs.matches(".*\\bAM4\\b.*")) return "AM4";
+        }
+
+        return null;
+    }
+
+    // ---------------------------------------------------------------
     // Rule 1: CPU socket must match Motherboard socket
     // ---------------------------------------------------------------
     private void checkCpuMotherboardSocket(Product cpu, Product motherboard, CompatibilityResult result) {
-        if (cpu == null || motherboard == null) {
-            return; // nothing to compare yet
-        }
+        if (cpu == null || motherboard == null) return;
 
-        String cpuSocket = normalize(SpecsUtil.get(SpecsUtil.parse(cpu.getSpecs()), "socket"));
-        String moboSocket = normalize(SpecsUtil.get(SpecsUtil.parse(motherboard.getSpecs()), "socket"));
+        // FIXED: Using our strict extractor instead of relying on scraped specs JSON
+        String cpuSocket = extractSocketFromProduct(cpu);
+        String moboSocket = extractSocketFromProduct(motherboard);
 
-        if (cpuSocket == null || moboSocket == null) {
-            return; // insufficient data, skip rather than false-flag
-        }
+        if (cpuSocket == null || moboSocket == null) return;
 
         if (!cpuSocket.equals(moboSocket)) {
             result.addIssue("MOTHERBOARD",
                     "CPU socket (" + cpuSocket + ") does not match motherboard socket (" + moboSocket + ").");
 
-            // suggest motherboards matching the chosen CPU's socket
             List<ProductDto> moboAlternatives = findAlternativesBySocket(ProductCategory.MOTHERBOARD, cpuSocket, motherboard.getId());
             result.addAlternatives("MOTHERBOARD", moboAlternatives);
 
-            // suggest CPUs matching the chosen motherboard's socket
             List<ProductDto> cpuAlternatives = findAlternativesBySocket(ProductCategory.CPU, moboSocket, cpu.getId());
             result.addAlternatives("CPU", cpuAlternatives);
         }
@@ -98,9 +113,7 @@ public class CompatibilityService {
     // Rule 2: Motherboard form factor must physically fit inside the Case
     // ---------------------------------------------------------------
     private void checkMotherboardCaseFormFactor(Product motherboard, Product pcCase, CompatibilityResult result) {
-        if (motherboard == null || pcCase == null) {
-            return;
-        }
+        if (motherboard == null || pcCase == null) return;
 
         String moboFormFactor = normalize(SpecsUtil.get(SpecsUtil.parse(motherboard.getSpecs()), "form_factor"));
         String caseType = normalize(SpecsUtil.get(SpecsUtil.parse(pcCase.getSpecs()), "type"));
@@ -108,9 +121,7 @@ public class CompatibilityService {
         Integer moboRank = rankOf(moboFormFactor);
         Integer caseRank = rankOf(caseType);
 
-        if (moboRank == null || caseRank == null) {
-            return;
-        }
+        if (moboRank == null || caseRank == null) return;
 
         if (caseRank < moboRank) {
             result.addIssue("CASE",
@@ -125,14 +136,10 @@ public class CompatibilityService {
     // Rule 3: PSU wattage must cover estimated CPU + GPU draw + headroom
     // ---------------------------------------------------------------
     private void checkPsuWattage(Product cpu, Product gpu, Product psu, CompatibilityResult result) {
-        if (psu == null || (cpu == null && gpu == null)) {
-            return;
-        }
+        if (psu == null || (cpu == null && gpu == null)) return;
 
         Double psuWattage = SpecsUtil.getDouble(SpecsUtil.parse(psu.getSpecs()), "wattage");
-        if (psuWattage == null) {
-            return;
-        }
+        if (psuWattage == null) return;
 
         double requiredWattage = psuHeadroomWatts;
         if (cpu != null) {
@@ -157,16 +164,12 @@ public class CompatibilityService {
     // Rule 4 (soft check): large AIO/radiator coolers may not fit compact cases
     // ---------------------------------------------------------------
     private void checkCoolerCaseFit(Product cooler, Product pcCase, CompatibilityResult result) {
-        if (cooler == null || pcCase == null) {
-            return;
-        }
+        if (cooler == null || pcCase == null) return;
 
         Double coolerSizeMm = SpecsUtil.getDouble(SpecsUtil.parse(cooler.getSpecs()), "size_mm");
         String caseType = normalize(SpecsUtil.get(SpecsUtil.parse(pcCase.getSpecs()), "type"));
 
-        if (coolerSizeMm == null || caseType == null) {
-            return;
-        }
+        if (coolerSizeMm == null || caseType == null) return;
 
         boolean isCompactCase = caseType.contains("MINI ITX") || caseType.contains("MINI TOWER");
         if (isCompactCase && coolerSizeMm > 240) {
@@ -194,7 +197,8 @@ public class CompatibilityService {
     private List<ProductDto> findAlternativesBySocket(ProductCategory category, String socket, Long excludeId) {
         return productRepository.findByCategory(category).stream()
                 .filter(p -> !p.getId().equals(excludeId))
-                .filter(p -> socket.equals(normalize(SpecsUtil.get(SpecsUtil.parse(p.getSpecs()), "socket"))))
+                // FIXED: Call extractSocketFromProduct so the alternatives map correctly!
+                .filter(p -> socket.equals(extractSocketFromProduct(p)))
                 .filter(p -> Boolean.TRUE.equals(p.getInStock()))
                 .sorted(Comparator.comparing(Product::getPriceEgp))
                 .limit(ALTERNATIVES_LIMIT)
@@ -231,38 +235,22 @@ public class CompatibilityService {
                 .collect(Collectors.toList());
     }
 
-    // ---------------------------------------------------------------
-    // Small utilities
-    // ---------------------------------------------------------------
     private Product firstOrNull(List<Product> products) {
         return (products == null || products.isEmpty()) ? null : products.get(0);
     }
 
     private String normalize(String value) {
-        if (value == null) {
-            return null;
-        }
+        if (value == null) return null;
         return value.trim().toUpperCase();
     }
 
     private Integer rankOf(String formFactorOrCaseType) {
-        if (formFactorOrCaseType == null) {
-            return null;
-        }
-        // match the longest known keyword contained in the (possibly verbose) case/mobo type string
-        if (formFactorOrCaseType.contains("EATX") || formFactorOrCaseType.contains("FULL TOWER")) {
-            return FORM_FACTOR_RANK.get("EATX");
-        }
+        if (formFactorOrCaseType == null) return null;
+        if (formFactorOrCaseType.contains("EATX") || formFactorOrCaseType.contains("FULL TOWER")) return FORM_FACTOR_RANK.get("EATX");
         if (formFactorOrCaseType.contains("MICRO ATX") || formFactorOrCaseType.contains("MICROATX")
-                || formFactorOrCaseType.contains("MATX") || formFactorOrCaseType.contains("M-ATX")) {
-            return FORM_FACTOR_RANK.get("MICRO ATX");
-        }
-        if (formFactorOrCaseType.contains("MINI ITX") || formFactorOrCaseType.contains("ITX")) {
-            return FORM_FACTOR_RANK.get("MINI ITX");
-        }
-        if (formFactorOrCaseType.contains("ATX")) {
-            return FORM_FACTOR_RANK.get("ATX");
-        }
+                || formFactorOrCaseType.contains("MATX") || formFactorOrCaseType.contains("M-ATX")) return FORM_FACTOR_RANK.get("MICRO ATX");
+        if (formFactorOrCaseType.contains("MINI ITX") || formFactorOrCaseType.contains("ITX")) return FORM_FACTOR_RANK.get("MINI ITX");
+        if (formFactorOrCaseType.contains("ATX")) return FORM_FACTOR_RANK.get("ATX");
         return null;
     }
 

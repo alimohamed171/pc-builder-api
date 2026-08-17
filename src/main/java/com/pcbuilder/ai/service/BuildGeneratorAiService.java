@@ -20,6 +20,8 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
@@ -65,6 +67,8 @@ public class BuildGeneratorAiService {
           "CASE": <id>,
           "COOLER": <id>
         }
+        - If a category is listed as "Locked", do NOT include it in your JSON response at all
+        - Only include JSON keys for categories that have an "Available Products" list below
         """;
 
     private static final String REPAIR_SYSTEM = """
@@ -114,7 +118,8 @@ public class BuildGeneratorAiService {
         log.info("[BuildGen] Starting AI build: budget={} usage={} brand={}", budget, usage, brand);
 
 
-        List<Product> mustIncludeProducts = resolveMustInclude(request.getMustInclude());
+        List<String> parsedMustIncludeIds = parseIdsFromPrompt(request.getPrompt(), request.getMustInclude());
+        List<Product> mustIncludeProducts = resolveMustInclude(parsedMustIncludeIds);
         Set<ProductCategory> lockedCategories = mustIncludeProducts.stream()
                 .map(Product::getCategory)
                 .collect(Collectors.toSet());
@@ -129,9 +134,10 @@ public class BuildGeneratorAiService {
         }
 
 
+        double remainingBudget = budget - mustIncludeCost;
         Map<ProductCategory, List<Product>> candidates =
                 deterministicPcBuilder.getCandidatesPerCategory(
-                        budget, usage, brand, CANDIDATES_PER_CATEGORY);
+                        remainingBudget, usage, brand, CANDIDATES_PER_CATEGORY, mustIncludeProducts);
 
         candidates.forEach((cat, products) -> {
             log.info("[Candidates] {} → {} products: {}",
@@ -142,7 +148,7 @@ public class BuildGeneratorAiService {
                             .collect(Collectors.joining(", ")));
         });
 
-        lockedCategories.forEach(candidates::remove);
+//        lockedCategories.forEach(candidates::remove);
 
         if (candidates.isEmpty()) {
             throw new AiServiceException(
@@ -150,7 +156,7 @@ public class BuildGeneratorAiService {
         }
 
         Map<ProductCategory, Long> aiPicks = askAiToPick(
-                budget, usage, brand, candidates, mustIncludeProducts, request.getPrompt());
+                remainingBudget, usage, brand, candidates, mustIncludeProducts, request.getPrompt());
 
         List<Product> pickedProducts = buildFinalList(aiPicks, mustIncludeProducts, candidates);
 
@@ -224,14 +230,14 @@ public class BuildGeneratorAiService {
     }
 
     private Map<ProductCategory, Long> askAiToPick(
-            double budget,
+            double remainingBudget,
             String usage,
             String brand,
             Map<ProductCategory, List<Product>> candidates,
             List<Product> mustInclude,
             String userPrompt) {
 
-        String prompt = buildPickPrompt(budget, usage, brand, candidates, mustInclude, userPrompt);
+        String prompt = buildPickPrompt(remainingBudget, usage, brand, candidates, mustInclude, userPrompt);
         log.info("[BuildGen] Sending pick prompt to AI...");
 
         try {
@@ -252,19 +258,30 @@ public class BuildGeneratorAiService {
     }
 
     private String buildPickPrompt(
-            double budget,
+            double remainingBudget,
             String usage,
             String brand,
             Map<ProductCategory, List<Product>> candidates,
             List<Product> mustInclude,
             String userPrompt) {
 
-        // Get allocation percentages to tell AI how much to spend per category
+        // Get original allocation percentages
         Map<ProductCategory, Double> allocation =
                 deterministicPcBuilder.getAllocationForUsage(usage);
 
+        // 1. Remove locked categories from the allocation map
+        Set<ProductCategory> lockedCats = mustInclude.stream()
+                .map(Product::getCategory)
+                .collect(Collectors.toSet());
+        lockedCats.forEach(allocation::remove);
+
+        // 2. Calculate the total percentage weight of the REMAINING categories
+        double remainingWeight = allocation.values().stream()
+                .mapToDouble(Double::doubleValue)
+                .sum();
+
         StringBuilder sb = new StringBuilder();
-        sb.append("Total Budget: ").append(String.format("%,.0f", budget)).append(" EGP\n");
+        sb.append("Remaining Budget to spend: ").append(String.format("%,.0f", remainingBudget)).append(" EGP\n");
         sb.append("Usage: ").append(usage).append("\n");
 
         if (brand != null && !brand.isBlank()) {
@@ -274,30 +291,45 @@ public class BuildGeneratorAiService {
             sb.append("User Request: ").append(userPrompt).append("\n");
         }
 
-        // Tell AI how much to spend per category
-        sb.append("\nTarget budget per category:\n");
-        for (Map.Entry<ProductCategory, List<Product>> entry : candidates.entrySet()) {
-            ProductCategory cat = entry.getKey();
-            double catBudget = budget * allocation.getOrDefault(cat, 0.10);
-            sb.append("  ").append(cat)
-                    .append(": ").append(String.format("%,.0f", catBudget)).append(" EGP\n");
-        }
-
         if (!mustInclude.isEmpty()) {
-            sb.append("\nLocked Components (already chosen, do NOT pick for these categories):\n");
+            sb.append("\nLocked Components (ALREADY IN BUILD — do NOT include these categories in your JSON response):\n");
             for (Product p : mustInclude) {
                 sb.append("- ").append(p.getCategory())
                         .append(": ").append(p.getRawName())
                         .append(" (").append(p.getPriceEgp()).append(" EGP)\n");
             }
+            sb.append("Your JSON must NOT contain keys for: ");
+            sb.append(mustInclude.stream()
+                    .map(p -> "\"" + p.getCategory().name() + "\"")
+                    .collect(Collectors.joining(", ")));
+            sb.append("\n");
+        }
+
+        // Tell AI how much to spend per remaining category
+        sb.append("\nTarget budget per category:\n");
+        for (Map.Entry<ProductCategory, List<Product>> entry : candidates.entrySet()) {
+            ProductCategory cat = entry.getKey();
+
+            // 3. Normalize the percentage against the remaining budget
+            double originalPercentage = allocation.getOrDefault(cat, 0.10);
+            double normalizedPercentage = remainingWeight > 0 ? (originalPercentage / remainingWeight) : 0;
+            double catBudget = remainingBudget * normalizedPercentage;
+
+            sb.append("  ").append(cat)
+                    .append(": ").append(String.format("%,.0f", catBudget)).append(" EGP\n");
         }
 
         sb.append("\nAvailable Products (pick ONE id per category):\n");
         for (Map.Entry<ProductCategory, List<Product>> entry : candidates.entrySet()) {
             ProductCategory cat = entry.getKey();
-            double catBudget = budget * allocation.getOrDefault(cat, 0.10);
+
+            double originalPercentage = allocation.getOrDefault(cat, 0.10);
+            double normalizedPercentage = remainingWeight > 0 ? (originalPercentage / remainingWeight) : 0;
+            double catBudget = remainingBudget * normalizedPercentage;
+
             sb.append("\n").append(cat)
                     .append(" (target: ").append(String.format("%,.0f", catBudget)).append(" EGP):\n");
+
             for (Product p : entry.getValue()) {
                 sb.append("  id=").append(p.getId())
                         .append(" | ").append(p.getRawName())
@@ -634,5 +666,38 @@ public class BuildGeneratorAiService {
         return picks.stream()
                 .mapToDouble(p -> p.getPriceEgp().doubleValue())
                 .sum();
+    }
+
+    private List<String> parseIdsFromPrompt(String prompt, List<String> explicitMustInclude) {
+        List<String> combinedIds = new ArrayList<>();
+
+        // 1. Keep any IDs that actually were sent properly
+        if (explicitMustInclude != null) {
+            combinedIds.addAll(explicitMustInclude);
+        }
+
+        if (prompt == null || prompt.isBlank()) {
+            return combinedIds;
+        }
+
+        // 2. Regex to find the exact phrase the Android app generates
+        // It looks for the phrase, then captures all numbers and commas that follow it
+        Pattern pattern = Pattern.compile("keeping these existing component IDs and filling in the rest:\\s*([0-9,\\s]+)");
+        Matcher matcher = pattern.matcher(prompt);
+
+        if (matcher.find()) {
+            String idsString = matcher.group(1); // Extracts e.g., "123, 456"
+
+            // 3. Split by comma and clean up spaces
+            String[] extractedArray = idsString.split(",");
+            for (String idStr : extractedArray) {
+                String cleanId = idStr.trim();
+                if (!cleanId.isEmpty() && !combinedIds.contains(cleanId)) {
+                    combinedIds.add(cleanId);
+                }
+            }
+        }
+
+        return combinedIds;
     }
 }

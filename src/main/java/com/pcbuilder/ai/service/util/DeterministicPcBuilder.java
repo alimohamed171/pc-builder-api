@@ -181,21 +181,51 @@ public class DeterministicPcBuilder {
     }
 
     public Map<ProductCategory, List<Product>> getCandidatesPerCategory(
-            Double budget, String usage, String preferredBrand, int limitPerCategory) {
+            Double remainingBudget, String usage, String preferredBrand, int limitPerCategory, List<Product> lockedProducts) {
 
-        if (budget == null || budget <= 0) return Map.of();
+        if (remainingBudget == null || remainingBudget <= 0) return Map.of();
 
         Map<ProductCategory, Double> allocation = getAllocationForUsage(usage);
-        Map<ProductCategory, List<Product>> result = new LinkedHashMap<>();
 
+        // Convert the locked products into a Set of categories
+        Set<ProductCategory> lockedCategories = lockedProducts != null ?
+                lockedProducts.stream().map(Product::getCategory).collect(Collectors.toSet()) : Set.of();
+
+        // 1. Remove locked categories so we don't allocate budget to them
+        if (!lockedCategories.isEmpty()) {
+            lockedCategories.forEach(allocation::remove);
+        }
+
+        // 2. Calculate total weight of the remaining categories to redistribute the 100%
+        double remainingWeight = allocation.values().stream().mapToDouble(Double::doubleValue).sum();
+        if (remainingWeight <= 0) return Map.of();
+
+        Map<ProductCategory, List<Product>> result = new LinkedHashMap<>();
         String requiredSocket = null;
         String requiredRamType = null;
 
+        // 3. NEW: Extract physical constraints from the locked components FIRST!
+        if (lockedProducts != null) {
+            for (Product p : lockedProducts) {
+                if (p.getCategory() == ProductCategory.MOTHERBOARD) {
+                    requiredSocket = extractSocket(p);
+                    requiredRamType = extractRamType(p);
+                } else if (p.getCategory() == ProductCategory.CPU && requiredSocket == null) {
+                    requiredSocket = extractSocket(p);
+                } else if (p.getCategory() == ProductCategory.MEMORY && requiredRamType == null) {
+                    requiredRamType = extractRamType(p);
+                }
+            }
+        }
+
         for (Map.Entry<ProductCategory, Double> entry : allocation.entrySet()) {
             ProductCategory cat = entry.getKey();
-            double subBudget = budget * entry.getValue();
 
-            // Base filtering — in stock, valid category, no laptop parts
+            // 4. Normalize the budget percentage
+            double normalizedPercentage = entry.getValue() / remainingWeight;
+            double subBudget = remainingBudget * normalizedPercentage;
+
+            // Base filtering – in stock, valid category, no laptop parts
             List<Product> baseCandidates = productCatalogCache.getByCategory(cat).stream()
                     .filter(p -> Boolean.TRUE.equals(p.getInStock()))
                     .filter(p -> looksLikeValidCategoryMatch(p, cat))
@@ -212,7 +242,6 @@ public class DeterministicPcBuilder {
                 if (!socketMatching.isEmpty()) {
                     candidates = socketMatching;
                 } else {
-                    // Try full catalog if nothing in base
                     List<Product> fullPoolMatch = filterBySocket(
                             productCatalogCache.getByCategory(cat).stream()
                                     .filter(p -> Boolean.TRUE.equals(p.getInStock()))
@@ -293,9 +322,23 @@ public class DeterministicPcBuilder {
                         .collect(Collectors.toList());
             }
 
-
+            // CPU Logic Fix: Brand FIRST, then Dominant Socket
             if (cat == ProductCategory.CPU) {
-                // Find dominant socket
+                // 1. Filter by Brand FIRST
+                if (preferredBrand != null && !preferredBrand.isBlank()) {
+                    List<Product> brandFiltered = withinBudget.stream()
+                            .filter(p -> matchesBrand(p, preferredBrand))
+                            .collect(Collectors.toList());
+
+                    if (!brandFiltered.isEmpty()) {
+                        withinBudget = brandFiltered;
+                        log.info("[Candidates] CPU filtered by brand={}", preferredBrand);
+                    } else {
+                        log.warn("[Candidates] No CPU found for brand={} within budget, ignoring brand preference", preferredBrand);
+                    }
+                }
+
+                // 2. NOW find dominant socket from the (potentially brand-filtered) list
                 requiredSocket = withinBudget.stream()
                         .map(this::extractSocket)
                         .filter(Objects::nonNull)
@@ -305,30 +348,7 @@ public class DeterministicPcBuilder {
                         .map(Map.Entry::getKey)
                         .orElse(null);
 
-                // ✅ NEW: Try to filter by brand preference for CPU
-                if (preferredBrand != null && !preferredBrand.isBlank()) {
-                    List<Product> brandFiltered = withinBudget.stream()
-                            .filter(p -> matchesBrand(p, preferredBrand))
-                            .collect(Collectors.toList());
-
-                    if (!brandFiltered.isEmpty()) {
-                        withinBudget = brandFiltered;
-                        // Re-detect socket from brand-filtered list
-                        requiredSocket = withinBudget.stream()
-                                .map(this::extractSocket)
-                                .filter(Objects::nonNull)
-                                .collect(Collectors.groupingBy(s -> s, Collectors.counting()))
-                                .entrySet().stream()
-                                .max(Map.Entry.comparingByValue())
-                                .map(Map.Entry::getKey)
-                                .orElse(requiredSocket);
-                        log.info("[Candidates] CPU filtered by brand={} socket={}", preferredBrand, requiredSocket);
-                    } else {
-                        log.warn("[Candidates] No CPU found for brand={} within budget, ignoring brand preference", preferredBrand);
-                    }
-                }
-
-                // Re-filter to dominant socket
+                // 3. Re-filter strictly to that dominant socket
                 if (requiredSocket != null) {
                     final String dominantSocket = requiredSocket;
                     List<Product> sameSocketCpus = withinBudget.stream()
@@ -338,7 +358,6 @@ public class DeterministicPcBuilder {
                         withinBudget = sameSocketCpus;
                     }
                 }
-
 
                 log.info("[Candidates] CPU dominant socket={}", requiredSocket);
             }
@@ -354,7 +373,7 @@ public class DeterministicPcBuilder {
                 if (requiredRamType == null && requiredSocket != null) {
                     requiredRamType = switch (requiredSocket) {
                         case "AM5", "LGA1851" -> "DDR5";
-                        case "AM4", "LGA1700", "LGA1200" -> "DDR4";
+                        case "AM4", "LGA1200" -> "DDR4"; // LGA 1700 removed to allow DDR5
                         default -> null;
                     };
                 }
@@ -365,8 +384,8 @@ public class DeterministicPcBuilder {
             List<Product> sample = spreadSample(withinBudget, limitPerCategory);
             result.put(cat, sample);
 
-            log.info("[Candidates] {} → {} candidates (subBudget={} EGP): {}",
-                    cat, sample.size(), subBudget,
+            log.info("[Candidates] {} -> {} candidates (subBudget={} EGP): {}",
+                    cat, sample.size(), String.format("%,.0f", subBudget),
                     sample.stream()
                             .map(p -> "id=" + p.getId() + "(" + p.getPriceEgp() + ")")
                             .collect(Collectors.joining(", ")));
@@ -471,8 +490,8 @@ public class DeterministicPcBuilder {
 
     public String extractSocket(Product p) {
         String text = (p.getRawName() + " " + (p.getSpecs() != null ? p.getSpecs() : "")).toUpperCase();
-        if (text.contains("AM4")) return "AM4";
-        if (text.contains("AM5")) return "AM5";
+        if (text.matches(".*\\bAM4\\b.*")) return "AM4";
+        if (text.matches(".*\\bAM5\\b.*")) return "AM5";
         if (text.contains("LGA1700") || text.contains("LGA 1700")) return "LGA1700";
         if (text.contains("LGA1200") || text.contains("LGA 1200")) return "LGA1200";
         if (text.contains("LGA1851") || text.contains("LGA 1851")) return "LGA1851";
