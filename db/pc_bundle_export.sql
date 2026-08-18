@@ -61,5 +61,41 @@ UNLOCK TABLES;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+-- 1. Updates for items missing the 'ddr_generation' spec entirely
+UPDATE products 
+SET specs = JSON_SET(specs, '$.ddr_generation', 'DDR4') 
+WHERE id IN (620, 633, 644, 653, 654, 659, 660, 662, 664);
 
+UPDATE products 
+SET specs = JSON_SET(specs, '$.ddr_generation', 'DDR5') 
+WHERE id IN (610, 611, 615, 616, 619, 625, 626, 630, 631, 632, 634, 635, 636, 639, 640, 645, 651);
+
+-- 2. Updates for items missing the DDR type in their raw_name (and specs where applicable)
+UPDATE products
+SET raw_name = REPLACE(raw_name, '16GB LPX', '16GB LPX DDR4')
+WHERE id = 602;
+
+UPDATE products
+SET raw_name = REPLACE(raw_name, '16GB 3200HZ', '16GB DDR4 3200HZ'),
+    specs = JSON_SET(specs, '$.ddr_generation', 'DDR4')
+WHERE id = 603;
+
+UPDATE products
+SET raw_name = REPLACE(raw_name, '8G 3200Mhz', '8GB DDR4 3200Mhz'),
+    specs = JSON_SET(specs, '$.ddr_generation', 'DDR4')
+WHERE id = 627;
+
+UPDATE products
+SET raw_name = REPLACE(raw_name, 'LPX-(2x8GB)', 'LPX DDR4-(2x8GB)'),
+    specs = JSON_SET(specs, '$.ddr_generation', 'DDR4')
+WHERE id = 647;
+
+-- 3. Updates to fix mismatched/incorrect DDR generations in specs (e.g. DDR5 in name, DDR3/4 in specs)
+UPDATE products 
+SET specs = JSON_SET(specs, '$.ddr_generation', 'DDR4') 
+WHERE id IN (614, 649, 655);
+
+UPDATE products 
+SET specs = JSON_SET(specs, '$.ddr_generation', 'DDR5') 
+WHERE id IN (606, 613, 617, 621, 629, 637, 656, 663);
 -- Dump completed on 2026-07-15  5:10:46
